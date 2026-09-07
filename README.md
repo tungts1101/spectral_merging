@@ -12,8 +12,8 @@ FF (final forgetting), mean ± std over 3 seeds, 10-task splits:
 
 | Benchmark | FA | AA | FF |
 |---|---|---|---|
-| CIFAR-100 | 91.87 ± 0.28 | 94.79 ± 0.15 | 3.10 ± 0.28 |
-| CUB-200 | 88.90 ± 0.46 | 92.16 ± 0.63 | 4.74 ± 0.39 |
+| CIFAR-100 | 91.97 ± 0.32 | 94.80 ± 0.14 | 2.94 ± 0.32 |
+| CUB-200 | 89.09 ± 0.02 | 92.45 ± 0.45 | 4.47 ± 0.24 |
 | ImageNet-R | 83.68 ± 0.15 | 87.54 ± 0.20 | 3.74 ± 0.39 |
 | Stanford Cars | 83.72 ± 0.05 | 87.09 ± 0.47 | 5.71 ± 0.53 |
 
@@ -135,8 +135,9 @@ python run_best.py          # all 4 benchmarks x 3 seeds
 - First run trains all backbones (~2 h/benchmark on a single 24 GB GPU);
   states are cached under `checkpoints_exp21/`, after which Stage-2 re-runs
   take ~10 min/seed.
-- Per-dataset hyperparameters (weight decay, α, λ, robust weight) are in
-  `run_best.py`; everything else is shared across benchmarks.
+- Per-dataset hyperparameters (weight decay, adapter coverage, merge α/p,
+  drift λ, alignment settings) are in `run_best.py`; everything else is shared
+  across benchmarks.
 
 ## Files
 
