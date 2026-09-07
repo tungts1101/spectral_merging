@@ -6,7 +6,7 @@ alignment. See README.md.
 
 Expected results (FA | AA | FF, mean +- std over seeds 1993/1994/1995):
   CIFAR-100  91.97 +- 0.32 | 94.80 +- 0.14 | 2.94 +- 0.32
-  CUB        89.09 +- 0.02 | 92.45 +- 0.45 | 4.47 +- 0.24
+  CUB        88.90 +- 0.46 | 92.16 +- 0.63 | 4.74 +- 0.39
   ImageNet-R 83.68 +- 0.15 | 87.54 +- 0.20 | 3.74 +- 0.39
   Cars       83.72 +- 0.05 | 87.09 +- 0.47 | 5.71 +- 0.53
 
@@ -38,9 +38,9 @@ CONFIGS = {
     },
     "cub": {
         "train_weight_decay": 1e-3,
-        "model_lora_target_modules": ["qkv"],
+        "model_lora_target_modules": ["qkv", "fc1", "fc2"],
         "train_merge_alpha": 0.10, "pspectral_p": 0.9,
-        "train_drift_lambda": 10.0, "train_ca_cov_shrinkage": 0.05,
+        "train_drift_lambda": 10.0, "train_ca_cov_shrinkage": 0.0,
         "train_ca_robust_weight": 0.1,
         "train_ca_n_classes": 40, "train_ca_k_samples": 64,
     },
