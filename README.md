@@ -12,10 +12,24 @@ FF (final forgetting), mean ± std over 3 seeds, 10-task splits:
 
 | Benchmark | FA | AA | FF |
 |---|---|---|---|
-| CIFAR-100 | 91.97 ± 0.32 | 94.80 ± 0.14 | 2.94 ± 0.32 |
+| CIFAR-100 | 91.95 ± 0.27 | 94.82 ± 0.14 | 3.05 ± 0.27 |
 | CUB-200 | 88.90 ± 0.46 | 92.16 ± 0.63 | 4.74 ± 0.39 |
 | ImageNet-R | 83.68 ± 0.15 | 87.54 ± 0.20 | 3.74 ± 0.39 |
 | Stanford Cars | 83.72 ± 0.05 | 87.09 ± 0.47 | 5.71 ± 0.53 |
+
+Joint-training upper bounds (same recipe, all classes in one task, 3 seeds;
+AA = FA by definition for a single session — `run_exp21_joint.py`):
+
+| Benchmark | FA | AA |
+|---|---|---|
+| CIFAR-100 | 93.48 ± 0.04 | 93.48 ± 0.04 |
+| CUB-200 | 89.88 ± 0.33 | 89.88 ± 0.33 |
+| ImageNet-R | 87.11 ± 0.25 | 87.11 ± 0.25 |
+| Stanford Cars | 89.19 ± 0.29 | 89.19 ± 0.29 |
+
+All per-dataset configurations use the uniform posture: no covariance
+shrinkage (gamma = 0) and identity-ridge drift lambda = 100 (CUB: 10);
+only weight decay, merge alpha and the LCA robust weight vary by dataset.
 
 ## Framework
 
