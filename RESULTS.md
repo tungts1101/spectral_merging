@@ -14,7 +14,11 @@ Metrics: **Last-Acc** = accuracy over all seen classes after the final task (FAA
 
 Baselines are each method's best protocol-matched published numbers (10-task, ViT-B/16-IN21K);
 where a paper's own protocol differed, a protocol-matched third-party re-run is used.
-`n/e` = not evaluated, `n/r` = not reported.
+`n/e` = not evaluated, `n/r` = not reported. APER+adapter's ImageNet-R cell (67.95 / 75.82,
+no std) is the official-code re-run from MOS (AAAI'25, arXiv:2412.09441 Tab. 1, "Aper+
+Adapter", IN-R B0-Inc20, ViT-B/16-IN21K) — verified against the paper 2026-09-16; MOS
+reports single-run numbers in that table, and no protocol-matched source with stds exists
+(APER's own paper uses B0-Inc5 = 40 tasks on IN-R).
 
 | Method | CIFAR-100 Last | CIFAR-100 Inc | IN-R Last | IN-R Inc | CUB Last | CUB Inc | Cars Last | Cars Inc | Avg Last | Avg Inc |
 |---|---|---|---|---|---|---|---|---|---|---|
