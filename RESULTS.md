@@ -137,6 +137,25 @@ Reported because this is the one other axis where we place second.
 
 Across every robustness axis the merge ordering pspectral > avg > TIES > max-abs holds.
 
+### Merge-method ablation
+
+The `Merge (…)` rows above are our own framework with the pspectral merge swapped for a
+classical weight-merging rule, everything else identical (same backbones, drift, LCA). The
+comparison isolates the contribution of spectral merging on accuracy and on robustness alike
+(clean accuracy over 3 seeds; corruption/perturbation single seed, shared harness):
+
+| Merge rule | Clean FA (3 seeds) | CIFAR-100-C ↑ | CIFAR-100-P ↓ |
+|---|---|---|---|
+| **pspectral (ours)** | **91.94 ± 0.30** | **80.02** | **3.25** |
+| average | 90.26 ± 0.36 | 78.68 | 3.48 |
+| TIES | 89.58 ± 0.36 | 77.97 | 3.59 |
+| max-abs | 88.70 ± 0.53 | 76.33 | 3.98 |
+
+The ordering pspectral > average > TIES > max-abs is identical on all three axes: spectral
+truncation of the update buys +1.7 clean accuracy over the best classical rule and the
+robustness gain comes with it, not at its expense. On CIFAR-C the classical-merge variants of
+our own framework (78.68 / 77.97) still beat every external baseline except E2-LoRA.
+
 ### Known weaknesses (future work)
 
 Two axes are not reported above because we do not place first or second on them; both are
