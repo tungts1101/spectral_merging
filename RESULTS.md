@@ -14,11 +14,13 @@ Metrics: **Last-Acc** = accuracy over all seen classes after the final task (FAA
 
 Baselines are each method's best protocol-matched published numbers (10-task, ViT-B/16-IN21K);
 where a paper's own protocol differed, a protocol-matched third-party re-run is used.
-`n/e` = not evaluated, `n/r` = not reported. APER+adapter's ImageNet-R cell (67.95 / 75.82,
-no std) is the official-code re-run from MOS (AAAI'25, arXiv:2412.09441 Tab. 1, "Aper+
-Adapter", IN-R B0-Inc20, ViT-B/16-IN21K) — verified against the paper 2026-09-16; MOS
-reports single-run numbers in that table, and no protocol-matched source with stds exists
-(APER's own paper uses B0-Inc5 = 40 tasks on IN-R).
+`n/e` = not evaluated, `n/r` = not reported. APER+adapter's ImageNet-R cell
+(65.79 ± 0.98 / 72.42 ± 1.41) is the 3-seed protocol-matched re-run from the SSIAT journal
+version (arXiv:2403.19979, Tab. 1, "Adam-Adapter", 10 sessions, ViT-B/16-IN21K — the same
+table our SSIAT row comes from). MOS's official-code single run (AAAI'25, arXiv:2412.09441
+Tab. 1, IN-R B0-Inc20) reports a higher 67.95 / 75.82 without std; third-party APER re-runs
+disagree by 1-2 points across papers, and the seed-replicated number is used here so every
+row carries mean ± std.
 
 | Method | CIFAR-100 Last | CIFAR-100 Inc | IN-R Last | IN-R Inc | CUB Last | CUB Inc | Cars Last | Cars Inc | Avg Last | Avg Inc |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -29,7 +31,7 @@ reports single-run numbers in that table, and no protocol-matched source with st
 | SLCA (ICCV'23) | 91.53 ± 0.28 | 94.09 ± 0.87 | 77.00 ± 0.33 | 81.17 ± 0.64 | 84.71 ± 0.40 | 90.94 ± 0.68 | 67.73 ± 0.85 | 76.93 ± 1.21 | 80.24 | 85.78 |
 | LAE (ICCV'23) | 85.59 ± 0.46 | 89.96 ± 0.44 | 72.66 ± 0.63 | 78.91 ± 0.89 | 77.48 ± 0.94 | 85.83 ± 0.68 | 52.47 ± 1.46 | 64.08 ± 1.01 | 72.05 | 79.70 |
 | RanPAC (NeurIPS'23) | 91.09 ± 0.25 | 94.03 ± 0.58 | 75.28 ± 0.14 | 80.66 ± 0.58 | 87.88 ± 0.53 | 92.57 ± 0.55 | 61.43 ± 0.84 | 72.36 ± 1.18 | 78.92 | 84.91 |
-| APER + adapter (IJCV'24) | 87.32 ± 0.28 | 91.21 ± 1.35 | 67.95 | 75.82 | 87.04 ± 0.13 | 92.13 ± 0.27 | 37.65 ± 0.09 | 49.22 ± 1.66 | 69.99 | 77.10 |
+| APER + adapter (IJCV'24) | 87.32 ± 0.28 | 91.21 ± 1.35 | 65.79 ± 0.98 | 72.42 ± 1.41 | 87.04 ± 0.13 | 92.13 ± 0.27 | 37.65 ± 0.09 | 49.22 ± 1.66 | 69.45 | 76.25 |
 | HiDe-Prompt (NeurIPS'23) | 92.61 ± 0.28 | 94.03 ± 0.01 | 75.06 ± 0.12 | 76.60 ± 0.01 | 86.61 ± 0.18 | 87.01 ± 0.03 | n/e | n/e | n/a | n/a |
 | CoMA (ECCV'24) | 92.00 ± 0.13 | 94.12 ± 0.63 | 77.47 ± 0.05 | 81.32 ± 0.17 | 85.95 ± 0.29 | 90.75 ± 0.39 | 73.35 ± 0.59 | 78.55 ± 0.42 | 82.19 | 86.19 |
 | CoFiMA (ECCV'24) | 92.77 ± 0.24 | 94.89 ± 0.94 | 78.25 ± 0.26 | 81.48 ± 0.56 | 87.11 ± 0.56 | 91.87 ± 0.69 | 76.96 ± 0.64 | 82.65 ± 0.96 | 83.77 | 87.72 |
