@@ -156,6 +156,52 @@ truncation of the update buys +1.7 clean accuracy over the best classical rule a
 robustness gain comes with it, not at its expense. On CIFAR-C the classical-merge variants of
 our own framework (78.68 / 77.97) still beat every external baseline except E2-LoRA.
 
+The same comparison on all four benchmarks (3 seeds, paired on the shared cached backbones,
+each dataset's tuned Stage-2 posture; classical rules incremental at coefficient 1.0):
+
+| Merge rule | CIFAR-100 | ImageNet-R | CUB | Cars |
+|---|---|---|---|---|
+| **pspectral (ours)** | **91.95** | **83.68** | **88.90** | **83.72** |
+| average | 90.26 | 83.32 | 85.87 | 82.36 |
+| TIES | 89.58 | 82.67 | 84.54 | 81.73 |
+| max-abs | 88.70 | 80.93 | 83.33 | 79.46 |
+
+The ordering pspectral > average > TIES > max-abs holds on every dataset. The margin is
+largest on the fine-grained sets (CUB +3.03, Cars +1.36 over the best classical rule) and the
+classical rules also forget 2-3x more (e.g. CUB FF 9.5-12.5 vs 4.7).
+
+## Component contributions (merging / alignment / drift)
+
+Six-cell lattice per dataset — base, M, A, MA, AD, MAD (M = spectral merging, A = LCA
+alignment, D = drift compensation; drift-without-alignment is omitted as a structural no-op:
+drift transports the class Gaussians, which only alignment consumes) — 3 seeds, cache-served,
+paired on the shared backbones. Build-up chain (Last-Acc | Inc-Acc):
+
+| | CIFAR-100 | ImageNet-R | CUB | Cars |
+|---|---|---|---|---|
+| merge | 88.15 \| 92.65 | 81.56 \| 86.24 | 76.17 \| 83.78 | 64.73 \| 71.75 |
+| + alignment | 90.37 \| 94.32 | 82.51 \| 87.04 | 87.32 \| 91.59 | 70.98 \| 81.29 |
+| + drift | 91.92 \| 94.81 | 83.63 \| 87.55 | 88.94 \| 92.26 | 83.63 \| 87.08 |
+
+Shapley values over the valid lattice (contribution in Last-Acc points; exact — they sum to
+full minus base):
+
+| Dataset | Merging | Alignment | Drift | Total |
+|---|---|---|---|---|
+| CIFAR-100 | 2.71 | 2.47 | 0.55 | 5.73 |
+| ImageNet-R | 2.88 | 1.17 | 0.63 | 4.69 |
+| CUB | 4.42 | 7.73 | 0.61 | 12.77 |
+| Cars | 6.62 | 8.96 | 8.11 | 23.70 |
+
+Findings: (1) merging and alignment are strongly synergistic on the fine-grained sets —
+merge x alignment interaction +8.1 (CUB) and +10.8 (Cars) vs +0.6-0.8 elsewhere; on CUB merge
+alone gains nothing (76.17 vs base 76.17) and pays out entirely through alignment. (2) On Cars,
+alignment alone HURTS (55.38 vs base 59.93 — heads calibrated to stale Gaussians) and drift is
+the largest single component (+12.7 on top of merge+alignment, FF 21.9 -> 5.8): prototype
+transport is load-bearing wherever the backbone drifts far. (3) Drift's on-top-of-full-stack
+margin is +1.1-1.6 everywhere else — modest but consistent. Every full-stack lattice cell
+reproduces its headline number within 0.09.
+
 ### Known weaknesses (future work)
 
 Two axes are not reported above because we do not place first or second on them; both are
