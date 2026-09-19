@@ -170,6 +170,62 @@ The ordering pspectral > average > TIES > max-abs holds on every dataset. The ma
 largest on the fine-grained sets (CUB +3.03, Cars +1.36 over the best classical rule) and the
 classical rules also forget 2-3x more (e.g. CUB FF 9.5-12.5 vs 4.7).
 
+### Merge 3-D ablation — ImageNet-R (variant x p x alpha)
+
+Full cube: spectral_variant in {only_A, only_B, separate, combine} x
+pspectral_p in {0.1, 0.3, 0.5, 0.7, 0.9, 1.0} x train_merge_alpha in the same
+six values — 144 cells, 3 seeds each (1993/1994/1995), cache-served on the
+r64 qkv+fc backbones at the tuned IN-R posture (wd 2e-4, identity-ridge
+lambda 100, gamma 0, robust 0.1). Values are Last-Acc means; p = 1.0 keeps
+all update energy (no truncation); the (p=1.0, alpha=1.0) corner deploys the
+raw sequential state (no merge). Per-cell data incl. seed counts:
+`figures_data/mc3d_imagenetr.csv`.
+
+
+**only_A** (rows p, columns alpha):
+
+| p \ α | 0.1 | 0.3 | 0.5 | 0.7 | 0.9 | 1.0 |
+|---|---|---|---|---|---|---|
+| 0.1 | 82.98 | 83.58 | 83.44 | 82.99 | 82.22 | 81.77 |
+| 0.3 | 83.04 | 83.67 | 83.28 | 82.74 | 81.88 | 81.27 |
+| 0.5 | 83.04 | 83.80 | 83.25 | 82.63 | 81.75 | 80.94 |
+| 0.7 | 83.10 | 83.69 | 83.16 | 82.34 | 81.30 | 80.79 |
+| 0.9 | 83.14 | 83.65 | 83.14 | 82.21 | 81.25 | 80.70 |
+| 1.0 | 83.10 | 83.72 | 83.22 | 82.27 | 81.34 | 80.78 |
+
+**only_B** (rows p, columns alpha):
+
+| p \ α | 0.1 | 0.3 | 0.5 | 0.7 | 0.9 | 1.0 |
+|---|---|---|---|---|---|---|
+| 0.1 | 81.92 | 82.74 | 83.01 | 82.90 | 82.44 | 82.29 |
+| 0.3 | 82.58 | 83.37 | 83.16 | 82.93 | 82.28 | 81.76 |
+| 0.5 | 82.87 | 83.50 | 83.30 | 82.59 | 81.82 | 81.23 |
+| 0.7 | 83.02 | 83.63 | 83.22 | 82.47 | 81.51 | 81.02 |
+| 0.9 | 83.07 | 83.61 | 83.19 | 82.33 | 81.37 | 80.97 |
+| 1.0 | 83.07 | 83.56 | 83.07 | 82.31 | 81.21 | 80.82 |
+
+**separate** (rows p, columns alpha):
+
+| p \ α | 0.1 | 0.3 | 0.5 | 0.7 | 0.9 | 1.0 |
+|---|---|---|---|---|---|---|
+| 0.1 | 81.75 | 82.57 | 82.84 | 82.98 | 82.61 | 82.30 |
+| 0.3 | 82.38 | 83.34 | 83.41 | 82.84 | 82.40 | 81.99 |
+| 0.5 | 82.82 | 83.51 | 83.21 | 82.77 | 82.04 | 81.59 |
+| 0.7 | 83.03 | 83.65 | 83.12 | 82.54 | 81.64 | 81.09 |
+| 0.9 | 83.11 | 83.72 | 83.22 | 82.34 | 81.52 | 80.70 |
+| 1.0 | 83.12 | 83.65 | 83.23 | 82.28 | 81.13 | 80.82 |
+
+**combine** (rows p, columns alpha):
+
+| p \ α | 0.1 | 0.3 | 0.5 | 0.7 | 0.9 | 1.0 |
+|---|---|---|---|---|---|---|
+| 0.1 | 81.65 | 82.72 | 82.87 | 82.92 | 82.59 | 82.44 |
+| 0.3 | 82.22 | 83.27 | 83.12 | 82.91 | 82.46 | 82.31 |
+| 0.5 | 82.63 | 83.49 | 83.22 | 82.92 | 82.23 | 81.94 |
+| 0.7 | 82.97 | 83.60 | 83.25 | 82.88 | 81.83 | 81.78 |
+| 0.9 | 83.17 | 83.71 | 83.17 | 82.79 | 81.81 | 81.34 |
+| 1.0 | 83.22 | 83.49 | 83.13 | 82.15 | 81.14 | 80.74 |
+
 ## Component contributions (merging / alignment / drift)
 
 Six-cell lattice per dataset — base, M, A, MA, AD, MAD (M = spectral merging, A = LCA
