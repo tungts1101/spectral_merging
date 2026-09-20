@@ -1037,11 +1037,40 @@ class Learner:
         y_true = np.concatenate(y_true)
         y_pred = np.concatenate(y_pred)
 
-        acc_total, grouped = accuracy(y_pred.T, y_true, self._class_increments)
+        # Domain-incremental scoring (E2-LoRA/DUCT convention): every session
+        # holds the SAME semantic classes, offset by session in the label
+        # space, so credit is given for the semantic class regardless of which
+        # domain block it was predicted in (pred % C == true % C). Exact-match
+        # scoring would additionally require identifying the domain, which is
+        # not the DIL task.
+        dil_classes = self._config.get("dil_classes_per_domain", None)
+        if dil_classes:
+            correct = (y_pred % dil_classes) == (y_true % dil_classes)
+            acc_total = np.around(correct.sum() * 100 / len(y_true), decimals=2)
+            grouped = []
+            for lo, hi in self._class_increments:
+                idxes = np.where((y_true >= lo) & (y_true <= hi))[0]
+                grouped.append(np.around(
+                    correct[idxes].sum() * 100 / len(idxes), decimals=2))
+        else:
+            acc_total, grouped = accuracy(y_pred.T, y_true, self._class_increments)
         grouped = [float(a) for a in grouped]
         self._mlp_matrix.append(grouped)
         self._last_total_acc = float(acc_total)
         logging.info(f"[Evaluation] Total Acc: {acc_total:.2f}, Grouped: {grouped}")
+
+        # Sample-weighted curve. For DIL this is the directly comparable pair
+        # to the E2-LoRA/DUCT tables: Last-Acc = final total acc, Inc-Acc =
+        # mean of the per-session totals. (FA/ASA below are the class/domain-
+        # EQUAL averages used elsewhere in this project — different numbers.)
+        if not hasattr(self, "_total_acc_curve"):
+            self._total_acc_curve = []
+        self._total_acc_curve.append(float(acc_total))
+        if dil_classes:
+            logging.info(
+                f"[Evaluation] DIL Last-Acc: {self._total_acc_curve[-1]:.2f}, "
+                f"Inc-Acc: {np.mean(self._total_acc_curve):.2f} "
+                f"(sample-weighted, mod-{dil_classes} scoring)")
 
         mat = np.zeros((num_tasks, num_tasks))
         for i in range(num_tasks):
@@ -1101,7 +1130,19 @@ class Learner:
             with torch.no_grad():
                 for _, (_, _, x, _) in enumerate(proto_loader):
                     feats.append(self.model.get_features(x.cuda()).cpu())
+            if not feats:
+                # Ghost class (present in the label space but absent from this
+                # split — e.g. DomainNet's one missing train class). Neutral
+                # stats: zero mean, jitter cov; contributes ~nothing to LCA.
+                logging.warning(f"[Stats] class {cls_idx} has no train samples; "
+                                f"using neutral stats")
+                self._class_means[cls_idx] = torch.zeros(feature_dim)
+                self._class_covs[cls_idx] = torch.eye(feature_dim) * 1e-4
+                continue
             feats = torch.cat(feats, dim=0)
+            if feats.size(0) == 1:
+                # torch.cov needs n>=2; duplicate -> zero cov + jitter below.
+                feats = torch.cat([feats, feats], dim=0)
             self._class_means[cls_idx] = feats.mean(dim=0)
             cov_mode = self._config.get("train_ca_cov_mode", "class")
             if cov_mode == "shared_corr":
@@ -1531,6 +1572,39 @@ class Learner:
                 )
                 return
 
+            # SOTA merging baselines (merging_sota.py): sequential pairwise
+            # merge of prev deployed state + current task state, same
+            # protocol as the spectral/classical incremental branches.
+            from merging_sota import SOTA_METHODS, sota_merge
+            if method in SOTA_METHODS:
+                base_params = torch.load(self.backbone_checkpoint(-1), map_location="cpu")
+                prev_ckpt = (
+                    self.backbone_checkpoint(0)
+                    if self._cur_task == 1
+                    else self.merged_checkpoint(self._cur_task - 1)
+                )
+                w_prev = torch.load(prev_ckpt, map_location="cpu")
+                w_new = torch.load(self.backbone_checkpoint(self._cur_task), map_location="cpu")
+                logging.info(
+                    f"[Merging] SOTA {method} (lamb={self._config['train_merge_coef']}) "
+                    f"of {os.path.basename(prev_ckpt)} + task {self._cur_task}")
+                backbone_params = sota_merge(
+                    base_params, w_prev, w_new, method,
+                    lamb=self._config["train_merge_coef"],
+                    dare_q=self._config.get("merge_dare_q", 0.9),
+                    della_q=self._config.get("merge_della_q", 0.5),
+                    bc_beta=self._config.get("merge_bc_beta", 0.85),
+                    bc_gamma=self._config.get("merge_bc_gamma", 0.01),
+                    knots_topk=self._config.get("merge_knots_topk", 50.0),
+                )
+                self.load_backbone(backbone_params, load_norm=model_use_norm)
+                logging.info(f"[Merging] Saving merged checkpoint for task {self._cur_task}")
+                torch.save(
+                    self.model.get_backbone_trainable_params(),
+                    self.merged_checkpoint(self._cur_task),
+                )
+                return
+
             # Task-vector merge (helper.merge) on CPU.
             base_params = torch.load(self.backbone_checkpoint(-1), map_location="cpu")
             logging.info(
@@ -1658,10 +1732,15 @@ DATA_TABLE = {
     "imagenetr": [(10, 20, 20)],
     "cub": [(10, 20, 20)],
     "cars": [(10, 16, 20)],
+    # Domain-incremental (E2-LoRA/DUCT protocol): session = domain, labels
+    # offset by session -> structurally identical to CIL for the learner.
+    "officehome_dil": [(4, 65, 65)],
+    "dndil": [(6, 345, 345)],
 }
 
 TOTAL_CLASSES = {"cifar224": 100, "imageneta": 200, "imagenetr": 200,
-                 "cub": 200, "cars": 196}
+                 "cub": 200, "cars": 196,
+                 "officehome_dil": 260, "dndil": 2070}
 
 BASE_CONFIG = {
     "seed": 1993,
@@ -1811,9 +1890,17 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
         "dataset_init_cls": dataset_init_cls,
         "dataset_increment": dataset_increment,
     })
+    # Long-term / custom splits: an experiment config may override the split
+    # (e.g. IN-R 20x10 or 50x4 per the E2-LoRA Table-2 protocol).
+    for k in ("dataset_num_task", "dataset_init_cls", "dataset_increment"):
+        if k in experiment_config:
+            config[k] = experiment_config[k]
 
+    # DIL datasets carry domain structure in the label offsets — the class
+    # order must NOT be shuffled (their protocol uses a fixed domain order).
+    shuffle_order = not dataset_name.endswith("dil")
     data_manager = DataManager(
-        config["dataset_name"], True, config["seed"],
+        config["dataset_name"], shuffle_order, config["seed"],
         config["dataset_init_cls"], config["dataset_increment"], False,
     )
 
@@ -1829,6 +1916,37 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
 
         learner = Learner(config)
         learner.learn(data_manager)
+
+        # Robustness-suite export: persist the DEPLOYED final model (merged
+        # backbone LoRA + aligned head + class Gaussians) in one small file.
+        if config.get("final_model_dir"):
+            os.makedirs(config["final_model_dir"], exist_ok=True)
+            out = os.path.join(
+                config["final_model_dir"],
+                f"{dataset_name}_{config_name}_s{seed}.pt")
+            if getattr(learner, "_is_e2", False):
+                # E2's older pairs are frozen (not in trainable params) and its
+                # structure grows per task -> pickle the whole module instead.
+                payload = {
+                    "kind": "exp21_pickle",
+                    "config": {k: v for k, v in config.items()},
+                    "model": learner.model.cpu().eval(),
+                    "known_classes": learner._total_classes,
+                }
+            else:
+                payload = {
+                    "kind": "exp21",
+                    "config": {k: v for k, v in config.items()},
+                    "backbone": {k: v.cpu() for k, v in
+                                 learner.model.get_backbone_trainable_params().items()},
+                    "classifier": learner.model.classifier.state_dict(),
+                    "known_classes": learner._total_classes,
+                }
+            if hasattr(learner, "_class_means"):
+                payload["class_means"] = learner._class_means.cpu()
+                payload["class_covs"] = learner._class_covs.cpu()
+            torch.save(payload, out)
+            logging.info(f"[Export] Final model saved to {out}")
 
         result = {
             "faa": learner._faa, "ffm": learner._ffm, "asa": learner._asa,

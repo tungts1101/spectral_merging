@@ -166,6 +166,27 @@ each dataset's tuned Stage-2 posture; classical rules incremental at coefficient
 | TIES | 89.58 | 82.67 | 84.54 | 81.73 |
 | max-abs | 88.70 | 80.93 | 83.33 | 79.46 |
 
+Extended comparison with published merging methods (each new rule tuned on ImageNet-R over
+a small grid — drop rate / mask band / rank budget x coefficient — then its best setting run
+on the other three datasets; same sequential pairwise protocol, task vectors from the LoRA
+base, 3 seeds, paired backbones; FA | AA):
+
+| Merge rule | Setting | CIFAR-100 | ImageNet-R | CUB | Cars |
+|---|---|---|---|---|---|
+| **pspectral (ours)** | per-dataset α, p 0.9 | **91.95 \| 94.82** | **83.68 \| 87.54** | **88.90 \| 92.16** | **83.72 \| 87.09** |
+| Model Breadcrumbs (ECCV'24) | β 0.5, γ 0.01, c 1.0 | 91.43 \| 94.71 | 83.08 \| 87.33 | 87.98 \| 91.68 | 83.01 \| 86.86 |
+| Model Stock (ECCV'24) | analytic t | 90.55 \| 94.37 | 83.36 \| 87.48 | 86.42 \| 91.04 | 82.65 \| 87.08 |
+| Task Arithmetic / average | c 1.0 | 90.26 \| 94.26 | 83.32 \| 87.45 | 85.87 \| 90.81 | 82.36 \| 87.09 |
+| DELLA | q 0.5, c 1.0 | 90.30 \| 94.30 | 83.00 \| 87.37 | 85.43 \| 90.65 | 82.29 \| 87.11 |
+| KnOTS-TIES (ICLR'25) | full rank, c 1.0 | 89.97 \| 93.98 | 82.97 \| 87.35 | 84.75 \| 90.09 | 81.90 \| 86.77 |
+| DARE (ICLR'25) | q 0.5, c 1.0 | 89.98 \| 94.19 | 82.48 \| 87.21 | 84.47 \| 90.43 | 81.88 \| 86.97 |
+| TIES (NeurIPS'23) | topk 100, c 1.0 | 89.58 \| 93.90 | 82.67 \| 87.14 | 84.54 \| 89.88 | 81.73 \| 86.77 |
+| max-abs (= MagMax, ECCV'24) | c 1.0 | 88.70 \| 93.44 | 80.93 \| 86.48 | 83.33 \| 89.27 | 79.46 \| 85.89 |
+
+Stage-1 tuning grids and all cell results are in `logs_exp21/sota_merge.log`; DARE at q=0.9
+with c=1.0 collapses in the sequential chain (FA 0.52 on ImageNet-R) and its tuned q=0.5 is
+used. Implementations in `merging_sota.py` (protocol-verified against `helper.merge`).
+
 The ordering pspectral > average > TIES > max-abs holds on every dataset. The margin is
 largest on the fine-grained sets (CUB +3.03, Cars +1.36 over the best classical rule) and the
 classical rules also forget 2-3x more (e.g. CUB FF 9.5-12.5 vs 4.7).
