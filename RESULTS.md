@@ -125,7 +125,7 @@ Reported because this is the one other axis where we place second.
 
 | Method | Mean FP ↓ |
 |---|---|
-| E2-LoRA | 3.23 |
+| E2-LoRA | 3.22 |
 | **Ours** | **3.25** |
 | Merge (avg) | 3.48 |
 | Merge (TIES) | 3.59 |
@@ -136,6 +136,12 @@ Reported because this is the one other axis where we place second.
 | EASE | 5.67 |
 
 Across every robustness axis the merge ordering pspectral > avg > TIES > max-abs holds.
+
+The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper reports the
+15 standard corruptions (excluding the held-out gaussian_blur, saturate, spatter,
+speckle_noise), which gives: Ours 79.11, E2-LoRA 78.75, Merge (avg) 77.80, Merge (TIES)
+77.10, TUNA 76.11, Merge (max-abs) 75.36, MOS 73.66, SLCA 72.67, EASE 69.38 (same ordering,
+same +0.36 margin over E2-LoRA).
 
 ### Merge-method ablation
 
@@ -179,7 +185,7 @@ base, 3 seeds, paired backbones; FA | AA):
 | Task Arithmetic / average | c 1.0 | 90.26 \| 94.26 | 83.32 \| 87.45 | 85.87 \| 90.81 | 82.36 \| 87.09 |
 | DELLA | q 0.5, c 1.0 | 90.30 \| 94.30 | 83.00 \| 87.37 | 85.43 \| 90.65 | 82.29 \| 87.11 |
 | KnOTS-TIES (ICLR'25) | full rank, c 1.0 | 89.97 \| 93.98 | 82.97 \| 87.35 | 84.75 \| 90.09 | 81.90 \| 86.77 |
-| DARE (ICLR'25) | q 0.5, c 1.0 | 89.98 \| 94.19 | 82.48 \| 87.21 | 84.47 \| 90.43 | 81.88 \| 86.97 |
+| DARE (ICML'24) | q 0.5, c 1.0 | 89.98 \| 94.19 | 82.48 \| 87.21 | 84.47 \| 90.43 | 81.88 \| 86.97 |
 | TIES (NeurIPS'23) | topk 100, c 1.0 | 89.58 \| 93.90 | 82.67 \| 87.14 | 84.54 \| 89.88 | 81.73 \| 86.77 |
 | max-abs (= MagMax, ECCV'24) | c 1.0 | 88.70 \| 93.44 | 80.93 \| 86.48 | 83.33 \| 89.27 | 79.46 \| 85.89 |
 
@@ -305,15 +311,15 @@ Last-Acc / Inc-Acc are sample-weighted totals, matching their protocol.
 
 | Method | Office-Home Last-Acc | Office-Home Inc-Acc | DomainNet Last-Acc | DomainNet Inc-Acc |
 |---|---|---|---|---|
-| L2P | 80.03 ± 1.29 | 79.72 ± 4.19 | 48.72 ± 2.93 | 50.45 ± 4.10 |
+| L2P | 80.03 ± 1.29 | 79.72 ± 4.19 | 48.72 ± 2.83 | 50.45 ± 4.10 |
 | DualPrompt | 80.85 ± 0.14 | 80.20 ± 3.81 | 50.46 ± 3.17 | 52.28 ± 3.35 |
-| CODA-Prompt | 85.07 ± 0.34 | 84.70 ± 2.94 | 59.99 ± 0.88 | 58.85 ± 4.49 |
-| MEMO | 63.09 ± 1.80 | 71.18 ± 2.76 | 58.41 ± 3.34 | 61.92 ± 5.39 |
-| RanPAC | 82.28 ± 0.07 | 82.30 ± 3.34 | 54.80 ± 0.36 | 55.20 ± 3.39 |
+| CODA-Prompt | 85.07 ± 0.34 | 84.70 ± 2.94 | 59.99 ± 0.88 | 59.85 ± 4.49 |
+| MEMO | 63.09 ± 1.80 | 71.18 ± 2.76 | 58.41 ± 3.20 | 61.92 ± 5.39 |
+| RanPAC | 82.28 ± 0.07 | 82.30 ± 3.34 | 54.80 ± 0.36 | 55.20 ± 3.93 |
 | EASE | 76.33 ± 2.16 | 81.16 ± 3.52 | 43.72 ± 1.70 | 50.50 ± 2.27 |
-| SimpleCIL | 75.72 ± 0.00 | 75.99 ± 5.03 | 44.08 ± 0.00 | 42.95 ± 4.84 |
+| SimpleCIL | 75.72 ± 0.00 | 75.69 ± 5.03 | 44.08 ± 0.00 | 42.95 ± 4.84 |
 | DCE | 84.40 ± 0.20 | 84.60 ± 3.00 | 63.50 ± 0.50 | 64.30 ± 6.00 |
-| DUCT | 85.42 ± 0.33 | 81.28 ± 0.00 | 67.01 ± 1.35 | 67.16 ± 3.75 |
+| DUCT | 85.42 ± 0.33 | 81.28 ± 0.31 | 67.01 ± 1.35 | 67.16 ± 3.75 |
 | E2-LoRA | 88.25 ± 0.25 | 84.94 ± 0.21 | 69.63 ± 0.05 | 68.69 ± 0.04 |
 | **Ours** | **89.96 ± 0.13** | **88.10 ± 0.20** | **71.05 ± 0.14** | **69.98 ± 0.07** |
 
