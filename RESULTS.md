@@ -206,7 +206,26 @@ r64 qkv+fc backbones at the tuned IN-R posture (wd 2e-4, identity-ridge
 lambda 100, gamma 0, robust 0.1). Values are Last-Acc means; p = 1.0 keeps
 all update energy (no truncation); the (p=1.0, alpha=1.0) corner deploys the
 raw sequential state (no merge). Per-cell data incl. seed counts:
-`figures_data/mc3d_imagenetr.csv`.
+`figures_data/mc3d_imagenetr.csv`. Full per-cell metrics — FA, AA, forgetting (FFM), and the
+final accuracy matrix split into old tasks (mean over tasks 0-8), the newest task (task 9) and
+the oldest five (tasks 0-4) — are in `figures_data/mc3d_imagenetr_full.csv` (exported by
+`export_mc3d_full.py`).
+
+Stability/plasticity breakdown along alpha (only_A, p = 0.9, 3 seeds):
+
+| α | FA | AA | FFM | old (t0–8) | new (t9) | oldest 5 (t0–4) |
+|---|---|---|---|---|---|---|
+| 0.10 | 83.14 | 86.95 | 3.51 | 83.03 | 84.10 | 83.38 |
+| 0.30 | 83.65 | 87.56 | 3.81 | 83.52 | 84.75 | 83.16 |
+| 0.50 | 83.14 | 87.38 | 4.57 | 82.99 | 84.45 | 82.37 |
+| 0.70 | 82.21 | 87.10 | 5.40 | 81.94 | 84.65 | 81.32 |
+| 0.90 | 81.25 | 86.54 | 6.06 | 80.96 | 83.86 | 80.39 |
+| 1.00 | 80.70 | 86.32 | 6.63 | 80.36 | 83.79 | 79.84 |
+
+α = 0.3 → 1.0 at p = 0.9, per variant (FA | FFM | old | new): only_A 83.65→80.70 | 3.81→6.63 |
+83.52→80.36 | 84.75→83.79; only_B 83.61→80.97 | 3.79→6.32 | 83.48→80.68 | 84.79→83.52;
+separate 83.73→80.70 | 3.64→6.56 | 83.62→80.38 | 84.68→83.57; combine 83.71→81.34 | 3.66→6.02 |
+83.56→81.08 | 85.07→83.64.
 
 
 **only_A** (rows p, columns alpha):
