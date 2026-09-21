@@ -135,6 +135,27 @@ Reported because this is the one other axis where we place second.
 | MOS | 5.03 |
 | EASE | 5.67 |
 
+### Robustness of the merge operators
+
+CIFAR-100-C and CIFAR-100-P for the merge rules of the comparison table, seed 1993, identical
+backbones and Stage-2 posture (only the merge differs). Corruption is the mean accuracy over
+19 corruptions x 5 severities; perturbation is the mean flip probability (lower is better).
+Per-category values: `figures_data/merge_cifar_c_per_category.csv`,
+`figures_data/merge_cifar_p_per_category.csv`.
+
+| Merge rule | CIFAR-100-C ↑ | clean | CIFAR-100-P ↓ |
+|---|---|---|---|
+| **Spectral (ours)** | **80.02** | 92.28 | **3.245** |
+| Model Stock | 79.00 | 90.99 | 3.431 |
+| Task Arithmetic (average) | 78.68 | 90.72 | 3.481 |
+| DELLA | 78.57 | 90.55 | 3.472 |
+| KnOTS-TIES | 78.45 | 90.42 | 3.525 |
+| DARE | 78.03 | 90.53 | 3.522 |
+| TIES | 77.97 | 90.06 | 3.588 |
+| Max-abs (MagMax) | 76.33 | 89.39 | 3.982 |
+
+Model Breadcrumbs was not evaluated on these two benchmarks.
+
 Across every robustness axis the merge ordering pspectral > avg > TIES > max-abs holds.
 
 The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper reports the
