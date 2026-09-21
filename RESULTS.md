@@ -75,7 +75,7 @@ but the table above keeps one uniform configuration across all four datasets.
 ### Running configuration
 
 Shared across all datasets: ViT-B/16-IN21K frozen; LoRA r=64, α=128, dropout 0, applied to
-`qkv`, `fc1`, `fc2` (5.9M trainable); 10 epochs/task; SGD momentum 0.9; lr 1e-2 (cosine to
+`qkv`, `fc1`, `fc2` (8.26M trainable: 8,257,536 LoRA parameters + 1,536 norm parameters = 8,259,072, verified by counting a checkpoint; analytically 12 blocks x (qkv 196,608 + fc1 245,760 + fc2 245,760)); 10 epochs/task; SGD momentum 0.9; lr 1e-2 (cosine to
 1e-6); batch 64; cross-entropy. Merge: pspectral, variant `only_A`. Drift: identity-ridge,
 transport `full`. LCA: N×K sampling with N=40, K=64, 10 epochs, SGD lr 1e-2.
 
@@ -272,6 +272,29 @@ separate 83.73→80.70 | 3.64→6.56 | 83.62→80.38 | 84.68→83.57; combine 83
 | 0.9 | 83.17 | 83.71 | 83.17 | 82.79 | 81.81 | 81.34 |
 | 1.0 | 83.22 | 83.49 | 83.13 | 82.15 | 81.14 | 80.74 |
 
+## Sequential versus independent task initialisation
+
+Default (sequential): task t's LoRA starts from task t-1's TRAINED state. Independent
+(`seqft_independent`): every task starts from the same fresh initial LoRA state. ImageNet-R,
+r64 qkv+fc, 3 seeds, tuned gamma=0 stack, merges applied to the resulting per-task states:
+
+| Merge rule under independent init | FA | AA | FFM |
+|---|---|---|---|
+| pspectral combine | 80.64 ± 0.20 | 85.67 ± 0.25 | 5.77 ± 0.13 |
+| pspectral separate | 80.45 ± 0.05 | 85.53 ± 0.25 | 5.97 ± 0.07 |
+| pspectral only_A | 80.43 ± 0.13 | 85.53 ± 0.27 | 6.05 ± 0.19 |
+| pspectral only_B | 80.38 ± 0.15 | 85.57 ± 0.25 | 6.09 ± 0.17 |
+| kspectral | 80.38 ± 0.21 | 85.57 ± 0.23 | 6.10 ± 0.17 |
+| max | 80.25 ± 0.39 | 85.55 ± 0.10 | 6.11 ± 0.18 |
+| min | 80.18 ± 0.44 | 85.49 ± 0.14 | 6.04 ± 0.32 |
+| average | 79.88 ± 0.24 | 85.29 ± 0.25 | 6.75 ± 0.39 |
+| TIES | 79.72 ± 0.11 | 85.16 ± 0.33 | 6.92 ± 0.20 |
+| no merge | 77.95 ± 0.35 | 83.95 ± 0.37 | 8.14 ± 0.48 |
+| max-abs | 77.75 ± 0.55 | 84.69 ± 0.51 | 7.94 ± 0.14 |
+
+Sequential initialisation with the same stack reaches 83.68 ± 0.15 FA (Section 1), i.e. 3.04
+above the best independent-init arm.
+
 ## Component contributions (merging / alignment / drift)
 
 Six-cell lattice per dataset — base, M, A, MA, AD, MAD (M = spectral merging, A = LCA
@@ -398,3 +421,26 @@ for 1 of 3 seeds (task 21, train accuracy collapsing from 0.97 to 0.34 and poiso
 of the sequential chain). Setting `train_epochs=5` for tasks with <=4 classes fixes it at no
 cost (CIFAR 87.05 with 5 epochs vs 86.82 with 10; all ImageNet-R seeds healthy). The 50-task
 rows above use 5 epochs.
+
+---
+
+## Appendix B — Hardware and software
+
+All experiments ran on a single workstation:
+
+| | |
+|---|---|
+| GPU | 1x NVIDIA GeForce RTX 4090, 24 GB (driver 590.48.01) |
+| CPU | Intel Core i9-12900K, 24 threads |
+| RAM | 125 GB |
+| OS | Ubuntu, Linux 6.8.0 |
+| Python | 3.9.23 |
+| PyTorch | 2.7.0+cu118 (CUDA 11.8) |
+| timm | 1.0.24 |
+
+Backbone training is the only GPU-heavy stage; per-task LoRA states are cached, so the merge,
+drift and alignment ablations are evaluation-only re-runs on cached checkpoints. Indicative
+costs on this machine: one 10-task CIFAR-100 / ImageNet-R run with cached backbones is about
+10 minutes per seed; one CIFAR-100-C evaluation (19 corruptions x 5 severities x 50,000
+images) is about 1.5 hours per model, and one CIFAR-100-P evaluation (10 perturbations x
+2,500 sequences x 31 frames) about 1.1 hours per model.
