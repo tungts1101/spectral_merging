@@ -53,6 +53,7 @@ row carries mean ± std.
 | TUNA (ICCV'25) | 91.79 ± 0.15 | 94.88 ± 0.06 | 79.44 ± 0.38 | 84.80 ± 0.37 | 88.40 ± 0.42 | 92.01 ± 0.68 | 69.46 ± 0.35 | 76.95 ± 0.39 | 82.27 | 87.16 |
 | SLDC (AAAI'26) | 91.48 ± 0.24 | 94.38 ± 0.69 | 80.00 ± 0.29 | 84.01 ± 0.46 | 87.15 ± 0.50 | 92.38 ± 0.57 | 80.50 ± 0.30 | 85.45 ± 0.41 | 84.78 | 89.06 |
 | LoDA (ICML'26) | 90.47 ± 0.06 | 93.46 ± 1.42 | 81.93 ± 0.20 | 86.90 ± 0.40 | 81.74 ± 0.78 | 89.35 ± 0.98 | n/e | n/e | n/a | n/a |
+| LCA (ICLR'26) † | n/r | 94.80 ± 0.30 | n/r | 85.80 ± 0.20 | n/r | 90.80 ± 0.30 | n/r | 76.20 ± 1.40 | n/a | 86.90 |
 | E2-LoRA (ICML'26) | **92.13 ± 0.19** | **95.01 ± 0.02** | 82.77 ± 0.10 | 87.18 ± 0.12 | **89.77 ± 0.16** | **92.68 ± 0.48** | 75.82 ± 0.28 | 80.90 ± 0.73 | 85.12 | 88.94 |
 | **Ours** | 91.95 ± 0.27 | 94.82 ± 0.14 | **83.68 ± 0.15** | **87.54 ± 0.20** | 88.90 ± 0.46 | 92.16 ± 0.63 | **83.72 ± 0.05** | **87.09 ± 0.47** | **87.06** | **90.40** |
 
@@ -66,6 +67,12 @@ IN-R 82.76 ± 0.54, CUB 88.26 ± 0.73, Cars 80.31 ± 0.13 — lower than the LoR
 every dataset, and our incremental ImageNet-R (83.68) and Cars (83.72) exceed it outright.
 E2-LoRA's claim of "matching joint training" on ImageNet-R (82.77 vs 82.76) holds only
 against that weaker full-FT bound, not against the LoRA-recipe bound (87.11).
+
+† LCA (Tran et al., ICLR 2026, arXiv:2603.09888) is reported for reference but is NOT
+protocol-matched to the rest of this table on two counts: it uses **ViT-B/16-IN1K** (not IN21K),
+and its Table 1 reports only the incremental accuracy AA = (1/T)ΣA_t, so no Last-Acc exists.
+Values are its IM+LCA row; its IM-only (incremental merging without the LCA loss) row is CIFAR
+92.80, IN-R 84.30, CUB 86.70, Cars 70.10 (4-dataset AA average 83.47).
 
 Our forgetting (FF): CIFAR 3.05 ± 0.27, IN-R 3.74 ± 0.39, CUB 4.74 ± 0.39, Cars 5.71 ± 0.53.
 
