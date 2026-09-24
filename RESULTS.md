@@ -145,22 +145,22 @@ Reported because this is the one other axis where we place second.
 
 ### Robustness of the merge operators
 
-CIFAR-100-C and CIFAR-100-P for the merge rules of the comparison table, seed 1993, identical
-backbones and Stage-2 posture (only the merge differs). Corruption is the mean accuracy over
-19 corruptions x 5 severities; perturbation is the mean flip probability (lower is better).
-Per-category values: `figures_data/merge_cifar_c_per_category.csv`,
-`figures_data/merge_cifar_p_per_category.csv`.
+CIFAR-100-C and CIFAR-100-P for the merge rules of the comparison table, **3 seeds**
+(1993/1994/1995), identical backbones and Stage-2 posture (only the merge differs).
+Corruption is the mean accuracy over 19 corruptions x 5 severities; perturbation is the mean
+flip probability (lower is better). Per-category values:
+`figures_data/merge_cifar_c_per_category.csv`, `figures_data/merge_cifar_p_per_category.csv`.
 
 | Merge rule | CIFAR-100-C ↑ | clean | CIFAR-100-P ↓ |
 |---|---|---|---|
-| **Spectral (ours)** | **80.02** | 92.28 | **3.245** |
-| Model Stock | 79.00 | 90.99 | 3.431 |
-| Task Arithmetic (average) | 78.68 | 90.72 | 3.481 |
-| DELLA | 78.57 | 90.55 | 3.472 |
-| KnOTS-TIES | 78.45 | 90.42 | 3.525 |
-| DARE | 78.03 | 90.53 | 3.522 |
-| TIES | 77.97 | 90.06 | 3.588 |
-| Max-abs (MagMax) | 76.33 | 89.39 | 3.982 |
+| **Spectral (ours)** | **79.75 ± 0.19** | 91.94 ± 0.30 | **3.237 ± 0.020** |
+| Model Stock | 78.58 ± 0.30 | 90.67 ± 0.31 | 3.381 ± 0.078 |
+| Task Arithmetic (average) | 78.21 ± 0.34 | 90.26 ± 0.36 | 3.431 ± 0.047 |
+| DELLA | 78.14 ± 0.31 | 90.23 ± 0.26 | 3.451 ± 0.040 |
+| KnOTS-TIES | 77.98 ± 0.35 | 89.98 ± 0.33 | 3.437 ± 0.071 |
+| DARE | 77.74 ± 0.21 | 90.16 ± 0.27 | 3.500 ± 0.015 |
+| TIES | 77.68 ± 0.21 | 89.58 ± 0.36 | 3.523 ± 0.060 |
+| Max-abs (MagMax) | 75.97 ± 0.31 | 88.70 ± 0.53 | 3.810 ± 0.148 |
 
 Model Breadcrumbs was not evaluated on these two benchmarks.
 
