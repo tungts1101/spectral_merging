@@ -53,7 +53,7 @@ row carries mean ± std.
 | TUNA (ICCV'25) | 91.79 ± 0.15 | 94.88 ± 0.06 | 79.44 ± 0.38 | 84.80 ± 0.37 | 88.40 ± 0.42 | 92.01 ± 0.68 | 69.46 ± 0.35 | 76.95 ± 0.39 | 82.27 | 87.16 |
 | SLDC (AAAI'26) | 91.48 ± 0.24 | 94.38 ± 0.69 | 80.00 ± 0.29 | 84.01 ± 0.46 | 87.15 ± 0.50 | 92.38 ± 0.57 | 80.50 ± 0.30 | 85.45 ± 0.41 | 84.78 | 89.06 |
 | LoDA (ICML'26) | 90.47 ± 0.06 | 93.46 ± 1.42 | 81.93 ± 0.20 | 86.90 ± 0.40 | 81.74 ± 0.78 | 89.35 ± 0.98 | n/e | n/e | n/a | n/a |
-| LCA (ICLR'26) | 91.19 ± 0.09 | 94.80 ± 0.30 | 81.40 | 85.80 ± 0.20 | 83.85 | 90.80 ± 0.30 | 64.55 ± 1.93 | 76.20 ± 1.40 | 80.25 | 86.90 |
+| LCA (ICLR'26) | 88.25 ± 0.47 | 92.96 ± 0.18 | 80.47 ± 0.31 | 85.66 ± 0.15 | 80.55 ± 0.36 | 88.08 ± 0.73 | 61.52 ± 0.53 | 73.12 ± 1.36 | 77.70 | 84.95 |
 | E2-LoRA (ICML'26) | **92.13 ± 0.19** | **95.01 ± 0.02** | 82.77 ± 0.10 | 87.18 ± 0.12 | **89.77 ± 0.16** | **92.68 ± 0.48** | 75.82 ± 0.28 | 80.90 ± 0.73 | 85.12 | 88.94 |
 | **Ours** | 91.95 ± 0.27 | 94.82 ± 0.14 | **83.68 ± 0.15** | **87.54 ± 0.20** | 88.90 ± 0.46 | 92.16 ± 0.63 | **83.72 ± 0.05** | **87.09 ± 0.47** | **87.06** | **90.40** |
 
@@ -68,12 +68,16 @@ every dataset, and our incremental ImageNet-R (83.68) and Cars (83.72) exceed it
 E2-LoRA's claim of "matching joint training" on ImageNet-R (82.77 vs 82.76) holds only
 against that weaker full-FT bound, not against the LoRA-recipe bound (87.11).
 
-LCA (Tran et al., ICLR 2026, arXiv:2603.09888) values are its IM+LCA configuration. Inc-Acc is
-as published (Table 1, 3 seeds); the paper does not tabulate Last-Acc, so those cells are
-computed from the per-task accuracy matrices logged by that project (`results/*.txt`), which
-reproduce the published Inc-Acc to within 0.15. CIFAR-100 and Cars have three seeds recorded
-there, ImageNet-R and CUB one. Its IM-only row (incremental merging without the LCA loss) is
-CIFAR 92.80, IN-R 84.30, CUB 86.70, Cars 70.10 Inc-Acc.
+LCA (Tran et al., ICLR 2026, arXiv:2603.09888) values are our own 3-seed run (1993/1994/1995)
+of its IM+LCA configuration on this protocol and backbone: sequential LoRA fine-tuning
+r=64 / alpha=128 on `qkv` only, 10 epochs, SGD lr 1e-2, weight decay 5e-4, batch 64;
+incremental TIES merge (coef 1.0, top-k 100); classifier alignment with 512 Gaussian samples
+per class, batch 128, 10 epochs, lr 5e-3, robust weight 0.1; no drift compensation; backbone
+`vit_base_patch16_224.augreg2_in21k_ft_in1k`. Both metrics come from the same runs, matching
+how every other re-run row is reported. Its forgetting (FF): CIFAR 9.27 ± 0.64, IN-R
+10.58 ± 0.52, CUB 16.56 ± 0.18, Cars 35.32 ± 0.82. For reference, the paper's published
+Inc-Acc (its Table 1, 3 seeds) is CIFAR 94.80 ± 0.30, IN-R 85.80 ± 0.20, CUB 90.80 ± 0.30,
+Cars 76.20 ± 1.40; our re-run matches on ImageNet-R and is 1.8-3.1 lower elsewhere.
 
 Our forgetting (FF): CIFAR 3.05 ± 0.27, IN-R 3.74 ± 0.39, CUB 4.74 ± 0.39, Cars 5.71 ± 0.53.
 
