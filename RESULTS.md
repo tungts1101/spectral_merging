@@ -111,25 +111,31 @@ swept and tie the defaults.
 
 ## 2. Robustness — CIFAR-100, 10 tasks
 
-All models trained under their own published recipes, exported at the evaluation point and
-run through one shared inference harness. Seed 1993.
+All models exported at the evaluation point and run through one shared inference harness.
+Seed 1993 unless noted. The E2-LoRA row is a 3-seed (1993/1994/1995) re-run of its published
+recipe with the backbone pinned to ours (`vit_base_patch16_224.augreg2_in21k_ft_in1k`,
+timm's default for `vit_base_patch16_224`); its published configuration loads the pure-IN21K
+tag, and the original single-seed numbers under that backbone were corrupted 79.61 / clean
+92.46.
 
 ### CIFAR-100-C (15 corruptions × 5 severities, mean accuracy)
 
 | Method | Corrupted ↑ | Clean |
 |---|---|---|
 | **Ours** | **80.02** | 92.28 |
-| E2-LoRA | 79.61 | 92.46 |
 | Merge (avg) | 78.68 | 90.72 |
 | Merge (TIES) | 77.97 | 90.06 |
+| E2-LoRA (matched backbone, 3 seeds) | 77.34 ± 0.34 | 90.86 ± 0.34 |
 | TUNA | 77.02 | 91.58 |
 | Merge (max-abs) | 76.33 | 89.39 |
 | MOS | 74.63 | 89.66 |
 | SLCA | 73.69 | 89.21 |
 | EASE | 70.27 | 85.45 |
 
-We are first on corruption robustness, +0.41 over E2-LoRA, despite starting 0.18 lower on clean
-accuracy — so the gap under corruption is a genuine robustness margin, not inherited headroom.
+We are first on corruption robustness. On the matched backbone the margin over E2-LoRA is
++2.41 corrupted (79.75 ± 0.19 vs 77.34 ± 0.34 on the 3-seed like-for-like comparison) and
++1.08 clean; against its published-backbone single-seed run the margin is +0.41 corrupted
+with clean 0.18 lower.
 
 ### CIFAR-100-P (perturbation, mean flip probability — lower is better)
 
@@ -172,9 +178,9 @@ Across every robustness axis the merge ordering pspectral > avg > TIES > max-abs
 
 The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper reports the
 15 standard corruptions (excluding the held-out gaussian_blur, saturate, spatter,
-speckle_noise), which gives: Ours 79.11, E2-LoRA 78.75, Merge (avg) 77.80, Merge (TIES)
-77.10, TUNA 76.11, Merge (max-abs) 75.36, MOS 73.66, SLCA 72.67, EASE 69.38 (same ordering,
-same +0.36 margin over E2-LoRA).
+speckle_noise), which gives: Ours 79.11, E2-LoRA matched 76.40 ± 0.35 (published-backbone
+single seed: 78.75), Merge (avg) 77.80, Merge (TIES) 77.10, TUNA 76.11, Merge (max-abs)
+75.36, MOS 73.66, SLCA 72.67, EASE 69.38.
 
 ### Merge-method ablation
 
