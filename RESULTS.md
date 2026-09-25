@@ -128,8 +128,11 @@ Seed 1993 unless noted. The E2-LoRA row is a 3-seed (1993/1994/1995) re-run of i
 recipe with the backbone pinned to ours (`vit_base_patch16_224.augreg2_in21k_ft_in1k`,
 timm's default for `vit_base_patch16_224`); its published configuration loads the pure-IN21K
 tag, and the original single-seed numbers under that backbone were corrupted 79.61 / clean
-92.46. The LCA row is seed 1993 of our re-run of its published configuration (the
-configuration of the main-table re-run note) on the same backbone.
+92.46. Matched-backbone E2-LoRA per seed (19-corruption mean / 15-corruption mean / clean):
+s1993 77.73 / 76.78 / 91.26, s1994 77.38 / 76.49 / 90.88, s1995 76.89 / 75.93 / 90.43; its
+seed-1993 CIFAR-100-P mean FP is 3.62. The LCA row is seed 1993 of our re-run of its
+published configuration (the configuration of the main-table re-run note) on the same
+backbone.
 
 ### CIFAR-100-C (15 corruptions × 5 severities, mean accuracy)
 
