@@ -128,7 +128,8 @@ Seed 1993 unless noted. The E2-LoRA row is a 3-seed (1993/1994/1995) re-run of i
 recipe with the backbone pinned to ours (`vit_base_patch16_224.augreg2_in21k_ft_in1k`,
 timm's default for `vit_base_patch16_224`); its published configuration loads the pure-IN21K
 tag, and the original single-seed numbers under that backbone were corrupted 79.61 / clean
-92.46.
+92.46. The LCA row is seed 1993 of our re-run of its published configuration (the
+configuration of the main-table re-run note) on the same backbone.
 
 ### CIFAR-100-C (15 corruptions × 5 severities, mean accuracy)
 
@@ -140,6 +141,7 @@ tag, and the original single-seed numbers under that backbone were corrupted 79.
 | E2-LoRA (matched backbone, 3 seeds) | 77.34 ± 0.34 | 90.86 ± 0.34 |
 | TUNA | 77.02 | 91.58 |
 | Merge (max-abs) | 76.33 | 89.39 |
+| LCA (ICLR'26) | 75.65 | 88.91 |
 | MOS | 74.63 | 89.66 |
 | SLCA | 73.69 | 89.21 |
 | EASE | 70.27 | 85.45 |
@@ -151,19 +153,21 @@ with clean 0.18 lower.
 
 ### CIFAR-100-P (perturbation, mean flip probability — lower is better)
 
-Reported because this is the one other axis where we place second.
-
 | Method | Mean FP ↓ |
 |---|---|
-| E2-LoRA | 3.22 |
 | **Ours** | **3.25** |
 | Merge (avg) | 3.48 |
 | Merge (TIES) | 3.59 |
+| E2-LoRA (matched backbone) | 3.62 |
 | Merge (max-abs) | 3.98 |
+| LCA (ICLR'26) | 3.99 |
 | TUNA | 4.06 |
 | SLCA | 4.31 |
 | MOS | 5.03 |
 | EASE | 5.67 |
+
+E2-LoRA's published-backbone single-seed run scored 3.22; the matched-backbone value above
+is seed 1993 of the same re-run as its CIFAR-100-C row.
 
 ### Robustness of the merge operators
 
@@ -192,7 +196,7 @@ The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper rep
 15 standard corruptions (excluding the held-out gaussian_blur, saturate, spatter,
 speckle_noise), which gives: Ours 79.11, E2-LoRA matched 76.40 ± 0.35 (published-backbone
 single seed: 78.75), Merge (avg) 77.80, Merge (TIES) 77.10, TUNA 76.11, Merge (max-abs)
-75.36, MOS 73.66, SLCA 72.67, EASE 69.38.
+75.36, LCA 74.81, MOS 73.66, SLCA 72.67, EASE 69.38.
 
 ### Merge-method ablation
 
