@@ -75,7 +75,21 @@ CUB 86.70 ± 0.80, Cars 70.10 ± 1.50. Our own 3-seed re-run of the IM+LCA confi
 this repo's code path and backbone (`vit_base_patch16_224.augreg2_in21k_ft_in1k`) gives
 Last / Inc: CIFAR 88.25 ± 0.47 / 92.96 ± 0.18, IN-R 80.47 ± 0.31 / 85.66 ± 0.15, CUB
 80.55 ± 0.36 / 88.08 ± 0.73, Cars 61.52 ± 0.53 / 73.12 ± 1.36 (matches the published
-Inc-Acc on ImageNet-R, 1.8-3.1 lower elsewhere).
+Inc-Acc on ImageNet-R, 1.8-3.1 lower elsewhere). Full re-run results, 3 seeds
+(1993/1994/1995) — configuration: sequential LoRA fine-tuning r=64 / alpha=128 on `qkv`
+only, 10 epochs, SGD lr 1e-2, weight decay 5e-4, batch 64; incremental TIES merge
+(coef 1.0, top-k 100); classifier alignment with 512 Gaussian samples per class, batch 128,
+10 epochs, lr 5e-3, robust weight 0.1; no drift compensation:
+
+| Dataset | Last-Acc | Inc-Acc | FF | per-seed Last-Acc |
+|---|---|---|---|---|
+| CIFAR-100 | 88.25 ± 0.47 | 92.96 ± 0.18 | 9.27 ± 0.64 | 88.90 / 88.03 / 87.82 |
+| ImageNet-R | 80.47 ± 0.31 | 85.66 ± 0.15 | 10.58 ± 0.52 | 80.05 / 80.59 / 80.78 |
+| CUB-200 | 80.55 ± 0.36 | 88.08 ± 0.73 | 16.56 ± 0.18 | 81.03 / 80.16 / 80.47 |
+| Cars-196 | 61.52 ± 0.53 | 73.12 ± 1.36 | 35.32 ± 0.82 | 61.83 / 60.77 / 61.95 |
+
+On the DIL protocol the same configuration gives Office-Home Last-Acc 88.75 ± 0.07 /
+Inc-Acc 87.61 ± 0.19 (FF 1.91 ± 0.20; see the domain-incremental table).
 
 Our forgetting (FF): CIFAR 3.05 ± 0.27, IN-R 3.74 ± 0.39, CUB 4.74 ± 0.39, Cars 5.71 ± 0.53.
 
