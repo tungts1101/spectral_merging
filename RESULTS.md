@@ -446,11 +446,24 @@ Last-Acc / Inc-Acc are sample-weighted totals, matching their protocol.
 | SimpleCIL | 75.72 ± 0.00 | 75.69 ± 5.03 | 44.08 ± 0.00 | 42.95 ± 4.84 |
 | DCE | 84.40 ± 0.20 | 84.60 ± 3.00 | 63.50 ± 0.50 | 64.30 ± 6.00 |
 | DUCT | 85.42 ± 0.33 | 81.28 ± 0.31 | 67.01 ± 1.35 | 67.16 ± 3.75 |
+| LCA (ICLR'26) | 88.75 ± 0.07 | 87.61 ± 0.19 | n/r | n/r |
 | E2-LoRA | 88.25 ± 0.25 | 84.94 ± 0.21 | 69.63 ± 0.05 | 68.69 ± 0.04 |
 | **Ours** | **89.96 ± 0.13** | **88.10 ± 0.20** | **71.05 ± 0.14** | **69.98 ± 0.07** |
 
-We lead on both benchmarks and both metrics: Office-Home +1.71 Last / +3.16 Inc, DomainNet
-+1.42 Last / +1.29 Inc.
+We lead on both benchmarks and both metrics. Margins to the strongest baseline on each:
+Office-Home +1.21 Last / +0.49 Inc (over LCA), DomainNet +1.42 Last / +1.29 Inc (over
+E2-LoRA). Against E2-LoRA on Office-Home the margin is +1.71 Last / +3.16 Inc.
+
+The LCA row is our own run of its published configuration on this protocol, 3 seeds
+(1993/1994/1995): sequential LoRA fine-tuning r=64 / alpha=128 on `qkv` only, 10
+epochs/session, SGD lr 1e-2, weight decay 5e-4, batch 64; incremental TIES merge
+(coef 1.0, top-k 100); classifier alignment with 512 Gaussian samples per class,
+batch 128, 10 epochs, lr 5e-3, robust weight 0.1; no drift compensation. Backbone
+pinned to `vit_base_patch16_224.augreg2_in21k_ft_in1k`, as for our own row. Its
+per-seed Office-Home Last-Acc is 88.77 / 88.83 / 88.65 (FF 1.91 ± 0.20). DomainNet is
+not reported: at 6 x 345 classes the published alignment setting (512 samples for every
+seen class) allocates a 3.0 GB feature tensor in the final session and exceeds the
+24 GB card.
 
 ---
 
