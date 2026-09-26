@@ -158,18 +158,21 @@ with clean 0.18 lower.
 
 ### CIFAR-100-P (perturbation, mean flip probability — lower is better)
 
+All rows are 3-seed (1993/1994/1995) mean ± std except TUNA (seed 1993) and MOS (seeds
+1993/1994), whose remaining seeds are still being evaluated.
+
 | Method | Mean FP ↓ |
 |---|---|
-| **Ours** | **3.25** |
-| Merge (avg) | 3.48 |
-| Merge (TIES) | 3.59 |
-| E2-LoRA (matched backbone) | 3.62 |
-| Merge (max-abs) | 3.98 |
-| LCA (ICLR'26) | 3.99 |
-| TUNA | 4.06 |
-| SLCA | 4.31 |
-| MOS | 5.03 |
-| EASE | 5.67 |
+| **Ours** | **3.237 ± 0.020** |
+| Merge (avg) | 3.431 ± 0.047 |
+| Merge (TIES) | 3.523 ± 0.059 |
+| E2-LoRA (matched backbone) | 3.609 ± 0.024 |
+| Merge (max-abs) | 3.810 ± 0.148 |
+| LCA (ICLR'26) | 3.949 ± 0.083 |
+| TUNA | 4.062 |
+| SLCA | 4.271 ± 0.052 |
+| MOS | 5.103 ± 0.077 |
+| EASE | 5.743 ± 0.051 |
 
 E2-LoRA's published-backbone single-seed run scored 3.22; the matched-backbone value above
 is seed 1993 of the same re-run as its CIFAR-100-C row.
