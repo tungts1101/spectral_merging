@@ -132,12 +132,13 @@ s1993 77.73 / 76.78 / 91.26, s1994 77.38 / 76.49 / 90.88, s1995 76.89 / 75.93 / 
 seed-1993 CIFAR-100-P mean FP is 3.62. The LCA row is our re-run of its published configuration
 (the configuration of the main-table re-run note) on the same backbone; per-seed
 CIFAR-100-C (19-corruption mean / 15-corruption mean / clean): s1993 75.65 / 74.81 / 88.91,
-s1994 75.33 / 74.48 / 88.04, s1995 74.79 / 73.89 / 87.72.
+s1994 75.33 / 74.48 / 88.04, s1995 74.79 / 73.89 / 87.72. TUNA per-seed CIFAR-100-C:
+s1993 77.02 / 76.11 / 91.58, s1994 77.02 / 76.09 / 91.82, s1995 76.97 / 76.04 / 91.62;
+its per-seed CIFAR-100-P mean FP is 4.062 / 4.105 / 4.138.
 
 ### CIFAR-100-C (15 corruptions × 5 severities, mean accuracy)
 
-All rows are 3-seed (1993/1994/1995) mean ± std except TUNA, which is seed 1993 pending its
-remaining seeds.
+All rows are 3-seed (1993/1994/1995) mean ± std.
 
 | Method | Corrupted ↑ | Clean |
 |---|---|---|
@@ -145,7 +146,7 @@ remaining seeds.
 | Merge (avg) | 78.21 ± 0.34 | 90.26 ± 0.36 |
 | Merge (TIES) | 77.68 ± 0.21 | 89.58 ± 0.36 |
 | E2-LoRA (matched backbone) | 77.34 ± 0.34 | 90.86 ± 0.34 |
-| TUNA | 77.02 | 91.58 |
+| TUNA | 77.00 ± 0.03 | 91.67 ± 0.10 |
 | Merge (max-abs) | 75.97 ± 0.31 | 88.70 ± 0.53 |
 | LCA (ICLR'26) | 75.26 ± 0.35 | 88.22 ± 0.50 |
 | MOS | 74.26 ± 0.36 | 89.42 ± 0.17 |
@@ -159,8 +160,9 @@ with clean 0.18 lower.
 
 ### CIFAR-100-P (perturbation, mean flip probability — lower is better)
 
-All rows are 3-seed (1993/1994/1995) mean ± std except TUNA (seed 1993) and MOS (seeds
-1993/1994), whose remaining seeds are still being evaluated.
+All rows are 3-seed (1993/1994/1995) mean ± std except MOS, which is seeds 1993/1994; its
+third seed was not run because it cannot affect the ordering (MOS is 9th of 10, 1.4 flip
+probability behind the nearest method).
 
 | Method | Mean FP ↓ |
 |---|---|
@@ -170,7 +172,7 @@ All rows are 3-seed (1993/1994/1995) mean ± std except TUNA (seed 1993) and MOS
 | E2-LoRA (matched backbone) | 3.609 ± 0.024 |
 | Merge (max-abs) | 3.810 ± 0.148 |
 | LCA (ICLR'26) | 3.949 ± 0.083 |
-| TUNA | 4.062 |
+| TUNA | 4.102 ± 0.031 |
 | SLCA | 4.271 ± 0.052 |
 | MOS | 5.103 ± 0.077 |
 | EASE | 5.743 ± 0.051 |
@@ -205,7 +207,7 @@ The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper rep
 15 standard corruptions (excluding the held-out gaussian_blur, saturate, spatter,
 speckle_noise), which gives (same seed basis as the table): Ours 78.89 ± 0.17, Merge (avg)
 77.35 ± 0.32, Merge (TIES) 76.84 ± 0.19, E2-LoRA matched 76.40 ± 0.35 (published-backbone
-single seed: 78.75), TUNA 76.11, Merge (max-abs) 75.07 ± 0.33, LCA 74.39 ± 0.38, MOS 73.30 ± 0.34,
+single seed: 78.75), TUNA 76.08 ± 0.03, Merge (max-abs) 75.07 ± 0.33, LCA 74.39 ± 0.38, MOS 73.30 ± 0.34,
 SLCA 73.15 ± 0.34, EASE 69.46 ± 0.16.
 
 ### Merge-method ablation
