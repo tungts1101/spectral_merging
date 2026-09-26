@@ -123,8 +123,7 @@ swept and tie the defaults.
 
 ## 2. Robustness — CIFAR-100, 10 tasks
 
-All models exported at the evaluation point and run through one shared inference harness.
-Seed 1993 unless noted. The E2-LoRA row is a 3-seed (1993/1994/1995) re-run of its published
+All models exported at the evaluation point and run through one shared inference harness. The E2-LoRA row is a 3-seed (1993/1994/1995) re-run of its published
 recipe with the backbone pinned to ours (`vit_base_patch16_224.augreg2_in21k_ft_in1k`,
 timm's default for `vit_base_patch16_224`); its published configuration loads the pure-IN21K
 tag, and the original single-seed numbers under that backbone were corrupted 79.61 / clean
@@ -136,18 +135,21 @@ backbone.
 
 ### CIFAR-100-C (15 corruptions × 5 severities, mean accuracy)
 
+All rows are 3-seed (1993/1994/1995) mean ± std except TUNA and LCA, which are seed 1993
+pending their remaining seeds.
+
 | Method | Corrupted ↑ | Clean |
 |---|---|---|
-| **Ours** | **80.02** | 92.28 |
-| Merge (avg) | 78.68 | 90.72 |
-| Merge (TIES) | 77.97 | 90.06 |
-| E2-LoRA (matched backbone, 3 seeds) | 77.34 ± 0.34 | 90.86 ± 0.34 |
+| **Ours** | **79.75 ± 0.19** | 91.94 ± 0.30 |
+| Merge (avg) | 78.21 ± 0.34 | 90.26 ± 0.36 |
+| Merge (TIES) | 77.68 ± 0.21 | 89.58 ± 0.36 |
+| E2-LoRA (matched backbone) | 77.34 ± 0.34 | 90.86 ± 0.34 |
 | TUNA | 77.02 | 91.58 |
-| Merge (max-abs) | 76.33 | 89.39 |
+| Merge (max-abs) | 75.97 ± 0.31 | 88.70 ± 0.53 |
 | LCA (ICLR'26) | 75.65 | 88.91 |
-| MOS | 74.63 | 89.66 |
-| SLCA | 73.69 | 89.21 |
-| EASE | 70.27 | 85.45 |
+| MOS | 74.26 ± 0.36 | 89.42 ± 0.17 |
+| SLCA | 74.20 ± 0.37 | 89.06 ± 0.20 |
+| EASE | 70.34 ± 0.16 | 85.45 ± 0.29 |
 
 We are first on corruption robustness. On the matched backbone the margin over E2-LoRA is
 +2.41 corrupted (79.75 ± 0.19 vs 77.34 ± 0.34 on the 3-seed like-for-like comparison) and
@@ -197,9 +199,10 @@ Across every robustness axis the merge ordering pspectral > avg > TIES > max-abs
 
 The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper reports the
 15 standard corruptions (excluding the held-out gaussian_blur, saturate, spatter,
-speckle_noise), which gives: Ours 79.11, E2-LoRA matched 76.40 ± 0.35 (published-backbone
-single seed: 78.75), Merge (avg) 77.80, Merge (TIES) 77.10, TUNA 76.11, Merge (max-abs)
-75.36, LCA 74.81, MOS 73.66, SLCA 72.67, EASE 69.38.
+speckle_noise), which gives (same seed basis as the table): Ours 78.89 ± 0.17, Merge (avg)
+77.35 ± 0.32, Merge (TIES) 76.84 ± 0.19, E2-LoRA matched 76.40 ± 0.35 (published-backbone
+single seed: 78.75), TUNA 76.11, Merge (max-abs) 75.07 ± 0.33, LCA 74.81, MOS 73.30 ± 0.34,
+SLCA 73.15 ± 0.34, EASE 69.46 ± 0.16.
 
 ### Merge-method ablation
 
