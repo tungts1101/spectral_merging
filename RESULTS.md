@@ -129,14 +129,15 @@ timm's default for `vit_base_patch16_224`); its published configuration loads th
 tag, and the original single-seed numbers under that backbone were corrupted 79.61 / clean
 92.46. Matched-backbone E2-LoRA per seed (19-corruption mean / 15-corruption mean / clean):
 s1993 77.73 / 76.78 / 91.26, s1994 77.38 / 76.49 / 90.88, s1995 76.89 / 75.93 / 90.43; its
-seed-1993 CIFAR-100-P mean FP is 3.62. The LCA row is seed 1993 of our re-run of its
-published configuration (the configuration of the main-table re-run note) on the same
-backbone.
+seed-1993 CIFAR-100-P mean FP is 3.62. The LCA row is our re-run of its published configuration
+(the configuration of the main-table re-run note) on the same backbone; per-seed
+CIFAR-100-C (19-corruption mean / 15-corruption mean / clean): s1993 75.65 / 74.81 / 88.91,
+s1994 75.33 / 74.48 / 88.04, s1995 74.79 / 73.89 / 87.72.
 
 ### CIFAR-100-C (15 corruptions × 5 severities, mean accuracy)
 
-All rows are 3-seed (1993/1994/1995) mean ± std except TUNA and LCA, which are seed 1993
-pending their remaining seeds.
+All rows are 3-seed (1993/1994/1995) mean ± std except TUNA, which is seed 1993 pending its
+remaining seeds.
 
 | Method | Corrupted ↑ | Clean |
 |---|---|---|
@@ -146,7 +147,7 @@ pending their remaining seeds.
 | E2-LoRA (matched backbone) | 77.34 ± 0.34 | 90.86 ± 0.34 |
 | TUNA | 77.02 | 91.58 |
 | Merge (max-abs) | 75.97 ± 0.31 | 88.70 ± 0.53 |
-| LCA (ICLR'26) | 75.65 | 88.91 |
+| LCA (ICLR'26) | 75.26 ± 0.35 | 88.22 ± 0.50 |
 | MOS | 74.26 ± 0.36 | 89.42 ± 0.17 |
 | SLCA | 74.20 ± 0.37 | 89.06 ± 0.20 |
 | EASE | 70.34 ± 0.16 | 85.45 ± 0.29 |
@@ -204,7 +205,7 @@ The CIFAR-100-C means above average all 19 corruptions in the CSV. The paper rep
 15 standard corruptions (excluding the held-out gaussian_blur, saturate, spatter,
 speckle_noise), which gives (same seed basis as the table): Ours 78.89 ± 0.17, Merge (avg)
 77.35 ± 0.32, Merge (TIES) 76.84 ± 0.19, E2-LoRA matched 76.40 ± 0.35 (published-backbone
-single seed: 78.75), TUNA 76.11, Merge (max-abs) 75.07 ± 0.33, LCA 74.81, MOS 73.30 ± 0.34,
+single seed: 78.75), TUNA 76.11, Merge (max-abs) 75.07 ± 0.33, LCA 74.39 ± 0.38, MOS 73.30 ± 0.34,
 SLCA 73.15 ± 0.34, EASE 69.46 ± 0.16.
 
 ### Merge-method ablation
