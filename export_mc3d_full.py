@@ -40,7 +40,7 @@ def parse(path, n_tasks=10):
 
 def main(ds):
     rows = []
-    for f in sorted(glob.glob(f"logs_exp21/{ds}/mc3d_*.log")):
+    for f in sorted(glob.glob(f"logs_main/{ds}/mc3d_*.log")):
         m = re.match(r"mc3d_(\w+?)_p([\d.]+)_a([\d.]+)$", os.path.basename(f)[:-4])
         if not m:
             continue

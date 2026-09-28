@@ -256,7 +256,7 @@ base, 3 seeds, paired backbones; FA | AA):
 | TIES (NeurIPS'23) | topk 100, c 1.0 | 89.58 \| 93.90 | 82.67 \| 87.14 | 84.54 \| 89.88 | 81.73 \| 86.77 |
 | max-abs (= MagMax, ECCV'24) | c 1.0 | 88.70 \| 93.44 | 80.93 \| 86.48 | 83.33 \| 89.27 | 79.46 \| 85.89 |
 
-Stage-1 tuning grids and all cell results are in `logs_exp21/sota_merge.log`; DARE at q=0.9
+Stage-1 tuning grids and all cell results are in `logs_main/sota_merge.log`; DARE at q=0.9
 with c=1.0 collapses in the sequential chain (FA 0.52 on ImageNet-R) and its tuned q=0.5 is
 used. Implementations in `merging_sota.py` (protocol-verified against `helper.merge`).
 

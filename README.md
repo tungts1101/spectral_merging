@@ -18,7 +18,7 @@ FF (final forgetting), mean ± std over 3 seeds, 10-task splits:
 | Stanford Cars | 83.72 ± 0.05 | 87.09 ± 0.47 | 5.71 ± 0.53 |
 
 Joint-training upper bounds (same recipe, all classes in one task, 3 seeds;
-AA = FA by definition for a single session — `run_exp21_joint.py`):
+AA = FA by definition for a single session — `run_joint.py`):
 
 | Benchmark | FA | AA |
 |---|---|---|
@@ -147,7 +147,7 @@ python run_best.py          # all 4 benchmarks x 3 seeds
 - Backbone: timm `vit_base_patch16_224.augreg2_in21k_ft_in1k` (downloaded from
   the HF hub on first run).
 - First run trains all backbones (~2 h/benchmark on a single 24 GB GPU);
-  states are cached under `checkpoints_exp21/`, after which Stage-2 re-runs
+  states are cached under `checkpoints_main/`, after which Stage-2 re-runs
   take ~10 min/seed.
 - Per-dataset hyperparameters (weight decay, adapter coverage, merge α/p,
   drift λ, alignment settings) are in `run_best.py`; everything else is shared

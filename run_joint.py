@@ -24,7 +24,7 @@ CONFIGS_BY_DS = {
         "model_lora_target_modules": ["qkv", "fc1", "fc2"],
         "train_weight_decay": wd,
         "train_ca": False, "train_drift": False,
-        "train_prefix": f"exp21_{ds}_joint",
+        "train_prefix": f"main_{ds}_joint",
         "cache_backbone": True, "reset_merge": True, "cleanup_merged": True}}
     for ds, wd in WD.items()
 }

@@ -15,10 +15,10 @@ import main
 
 SEEDS = (1993, 1994, 1995)
 DS = {
-    "imagenetr": ("exp21_inr_r64_qkvfc", 2e-4, 100.0, 0.1),
-    "cifar224":  ("exp21_cifar224_r64_qkvfc", 5e-4, 100.0, 0.2),
-    "cub":       ("exp21_cub_r64_qkvfc", 1e-3, 10.0, 0.1),
-    "cars":      ("exp21_cars_r64_qkvfc", 1e-3, 100.0, 0.2),
+    "imagenetr": ("main_inr_r64_qkvfc", 2e-4, 100.0, 0.1),
+    "cifar224":  ("main_cifar224_r64_qkvfc", 5e-4, 100.0, 0.2),
+    "cub":       ("main_cub_r64_qkvfc", 1e-3, 10.0, 0.1),
+    "cars":      ("main_cars_r64_qkvfc", 1e-3, 100.0, 0.2),
 }
 
 def base_cfg(ds):

@@ -11,12 +11,12 @@ Expected results (FA | AA | FF, mean +- std over seeds 1993/1994/1995):
   Cars       83.72 +- 0.05 | 87.09 +- 0.47 | 5.71 +- 0.53
 
 Joint-training upper bounds (same backbone recipe, all classes in one task;
-AA = FA by definition, single session) via run_exp21_joint.py:
+AA = FA by definition, single session) via run_joint.py:
   CIFAR-100 93.48 +- 0.04 | ImageNet-R 87.11 +- 0.25
   CUB       89.88 +- 0.33 | Cars       89.19 +- 0.29
 
 Single-run noise is ~+-0.2-0.3; expect per-seed numbers within that band.
-Backbone checkpoints are cached under checkpoints_exp21/ after the first run;
+Backbone checkpoints are cached under checkpoints_main/ after the first run;
 Stage-2 re-runs are then cheap (~10 min/seed).
 """
 import time

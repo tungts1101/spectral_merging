@@ -64,8 +64,8 @@ import sys
 import copy
 
 
-CHECKPOINT_ROOT = "checkpoints_exp21"
-LOG_DIR = "logs_exp21"
+CHECKPOINT_ROOT = "checkpoints_main"
+LOG_DIR = "logs_main"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 g = torch.Generator()
@@ -1928,14 +1928,14 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
                 # E2's older pairs are frozen (not in trainable params) and its
                 # structure grows per task -> pickle the whole module instead.
                 payload = {
-                    "kind": "exp21_pickle",
+                    "kind": "main_pickle",
                     "config": {k: v for k, v in config.items()},
                     "model": learner.model.cpu().eval(),
                     "known_classes": learner._total_classes,
                 }
             else:
                 payload = {
-                    "kind": "exp21",
+                    "kind": "main",
                     "config": {k: v for k, v in config.items()},
                     "backbone": {k: v.cpu() for k, v in
                                  learner.model.get_backbone_trainable_params().items()},
@@ -2047,7 +2047,7 @@ def run_recipe_comparison(datasets=None, recipes=None, seeds=(1993,),
     recipes = recipes or ["seqft", "basic_lora", "sgp_lora", "nsp_lora", "full", "full_nsp"]
     configs = {}
     for method in recipes:
-        cfg = {"train_method": method, "train_prefix": "exp21_v1"}
+        cfg = {"train_method": method, "train_prefix": "main_v1"}
         if native and method != "seqft":
             cfg.update(NATIVE_PRESET)
         if extra:
@@ -2067,7 +2067,7 @@ def run_smoke_tests():
     for method in recipes:
         cfg = {
             "train_method": method,
-            "train_prefix": "exp21_smoke",
+            "train_prefix": "main_smoke",
             "train_stop_at_task": 1,
             "train_epochs": 1,
             "reset_train": True,
