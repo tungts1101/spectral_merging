@@ -11,7 +11,7 @@ import logging
 import sys
 import time
 import numpy as np
-import exp21
+import main
 
 SEEDS = (1993, 1994, 1995)
 DS = {
@@ -51,7 +51,7 @@ GRIDS = {
 def run(ds, name, cfg):
     faas, asas = [], []
     for seed in SEEDS:
-        r = exp21.run_single_experiment(ds, name, cfg, seed)
+        r = main.run_single_experiment(ds, name, cfg, seed)
         faas.append(r["faa"]); asas.append(r["asa"])
     logging.info(f"SWEEP SUMMARY [sota-{ds}] {name}: "
                  f"FA {np.mean(faas):.2f} ± {np.std(faas):.2f} | "
@@ -61,7 +61,7 @@ def run(ds, name, cfg):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(filename)s] => %(message)s",
-                        handlers=[logging.FileHandler(f"{exp21.LOG_DIR}/sota_merge.log"),
+                        handlers=[logging.FileHandler(f"{main.LOG_DIR}/sota_merge.log"),
                                   logging.StreamHandler(sys.stdout)], force=True)
     t0 = time.time()
     best = {}

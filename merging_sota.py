@@ -2,7 +2,7 @@
 
 Each rule merges the previous DEPLOYED state w_prev with the newly trained
 state w_new (LoRA state dicts), producing the next deployed state — the same
-sequential protocol as the spectral and classical branches in exp21:
+sequential protocol as the spectral and classical branches in main.py:
 
     C = w_prev + lamb * R(w_new - w_prev)        (update-transform rules)
 

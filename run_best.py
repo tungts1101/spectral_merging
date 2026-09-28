@@ -20,7 +20,7 @@ Backbone checkpoints are cached under checkpoints_exp21/ after the first run;
 Stage-2 re-runs are then cheap (~10 min/seed).
 """
 import time
-import exp21
+import main
 
 SEEDS = (1993, 1994, 1995)
 
@@ -72,5 +72,5 @@ if __name__ == "__main__":
     for ds, overrides in CONFIGS.items():
         cfg = {**BASE, **overrides,
                "train_prefix": f"best_{ds}_r64"}
-        exp21.run_config_sweep([ds], {f"best_{ds}": cfg}, list(SEEDS))
+        main.run_config_sweep([ds], {f"best_{ds}": cfg}, list(SEEDS))
     print(f"Total: {(time.time() - t0) / 3600:.2f}h")

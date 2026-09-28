@@ -1,9 +1,9 @@
-"""Backbone adapters for exp21: ports of the training recipes from
+"""Backbone adapters for main.py: ports of the training recipes from
 https://github.com/raoxuan98-hash/lr_rgda_hopdc (models/basic_lora.py,
 models/sgp_lora.py, models/full_finetune.py, models/distillator.py, lora.py).
 
 Self-contained (torch + timm only). All wrappers share one interface driven by
-exp21.Learner:
+main.Learner:
     forward(x) -> features            (num_classes=0 ViT, pooled CLS)
     get_param_groups()                -> trainable params for the optimizer
     merge_lora_weights()              fold adapter into backbone, re-init adapter
@@ -846,7 +846,7 @@ class E2LoRAMlp(_E2PairMixin, nn.Module):
 class E2LoRAViT(BaseAdapterViT):
     """E2-LoRA wrapper: patches every block's attn and mlp; final norm affine
     reset to identity (their trainer.py:64-65). lora_modules stays empty --
-    the exp21 fold/covariance paths must not touch the pair lists."""
+    the main.py fold/covariance paths must not touch the pair lists."""
 
     def __init__(self, vit_model, budget=None):
         super().__init__(vit_model)

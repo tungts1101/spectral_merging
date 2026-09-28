@@ -109,7 +109,7 @@ Why it works — findings from ablations in this project:
 
 Implementation: `pspectral_merging` in `helper.py` (factor-pair detection is
 name-generic, so any adapted module merges the same way); the incremental
-dispatch is `Learner.merge()` in `exp21.py`.
+dispatch is `Learner.merge()` in `main.py`.
 
 ### 3. Drift compensation (identity-ridge map)
 
@@ -157,8 +157,8 @@ python run_best.py          # all 4 benchmarks x 3 seeds
 
 | File | Contents |
 |---|---|
-| `exp21.py` | learner: seqft training, incremental merge dispatch, drift map, class stats, LCA alignment, eval + sweep harness |
+| `main.py` | learner: seqft training, incremental merge dispatch, drift map, class stats, LCA alignment, eval + sweep harness |
 | `helper.py` | `pspectral_merging` / `truncate_energy` (the spectral merge), task-vector merges, PEFT backbone builder, metrics |
-| `backbones_exp21.py` | reference-recipe ports and adapter utilities used by exp21 |
+| `backbones.py` | reference-recipe ports and adapter utilities used by main.py |
 | `utils/` | dataset definitions and the incremental `DataManager` |
 | `run_best.py` | headline-result reproduction script |

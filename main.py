@@ -1,9 +1,9 @@
-"""exp21: unified backbone-training recipe comparison.
+"""main: unified backbone-training recipe comparison.
 
 Compares the current exp19 recipe ("seqft": PEFT LoRA r=64/qkv, init each task
 from the previous TRAINED LoRA, spectral-family merge for feature extraction)
 against the recipes ported from https://github.com/raoxuan98-hash/lr_rgda_hopdc
-(backbones_exp21.py): basic_lora, sgp_lora, nsp_lora, full, full_nsp,
+(backbones.py): basic_lora, sgp_lora, nsp_lora, full, full_nsp,
 joint_lora/joint_full, first_task_lora — with Stage 2 (class Gaussians +
 shrinkage -> identity-ridge drift transport -> NxK LCA alignment) held
 IDENTICAL across recipes (ported verbatim from exp19).
@@ -17,8 +17,8 @@ Feature-KD (gamma_kd > 0) from the previous-task feature extractor is
 composable with every recipe.
 
 Usage:
-    python exp21.py --smoke              # tiny 2-task run of every recipe
-    python exp21.py                      # controlled comparison sweep (default)
+    python main.py --smoke              # tiny 2-task run of every recipe
+    python main.py                      # controlled comparison sweep (default)
 """
 
 from tqdm import tqdm
@@ -46,7 +46,7 @@ from helper import (
     get_backbone,
     ContinualLinear,
 )
-from backbones_exp21 import (
+from backbones import (
     MERGE_FAMILY,
     build_recipe_backbone,
     build_projection,
@@ -790,7 +790,7 @@ class Learner:
         speccap_anchor = self._config.get("speccap_anchor", "total")  # total | task
         spec_layers = None
         if self._method == "seqft" and (specreg > 0 or speccap):
-            from backbones_exp21 import peft_qkv_modules
+            from backbones import peft_qkv_modules
             spec_scale = self._config["model_lora_alpha"] / self._config["model_lora_r"]
             spec_layers = {}
             need_W0 = specreg > 0 or (speccap and speccap_anchor == "task")
@@ -1489,7 +1489,7 @@ class Learner:
         self._cap_model(self.model)
 
     def _cap_model(self, target):
-        from backbones_exp21 import peft_qkv_modules
+        from backbones import peft_qkv_modules
         scale = self._config["model_lora_alpha"] / self._config["model_lora_r"]
         cap = float(self._config["infer_speccap"])
         capped = 0

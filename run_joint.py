@@ -12,7 +12,7 @@ This replaces the SLCA-published joint numbers currently cited in RESULTS.md
 our own backbone/recipe, making the "gap to upper bound" row self-consistent.
 """
 import time
-import exp21
+import main
 
 SEEDS = (1993, 1994, 1995)
 WD = {"cifar224": 5e-4, "imagenetr": 2e-4, "cub": 1e-3, "cars": 1e-3}
@@ -32,5 +32,5 @@ CONFIGS_BY_DS = {
 if __name__ == "__main__":
     t0 = time.time()
     for ds, cfgs in CONFIGS_BY_DS.items():
-        exp21.run_config_sweep([ds], cfgs, list(SEEDS))
+        main.run_config_sweep([ds], cfgs, list(SEEDS))
     print(f"Joint upper bounds total: {(time.time() - t0) / 3600:.2f}h")
