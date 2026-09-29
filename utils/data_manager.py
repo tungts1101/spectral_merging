@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image, ImageOps, ImageFilter
 from torch.utils.data import Dataset
 from torchvision import transforms
-from utils.data import iCIFAR224, iImageNetR, iImageNetA, CUB, omnibenchmark, vtab, cars, core50, cddb, domainnet, iTinyImageNet, iPlaces365
+from utils.data import iCIFAR224, iImageNetR, iImageNetA, CUB, omnibenchmark, vtab, cars, core50, cddb, domainnet, iTinyImageNet, iPlaces365, officehome_dil, dndil
 import random
 
 
@@ -212,6 +212,10 @@ def _get_idata(dataset_name,use_input_norm):
         return vtab(use_input_norm)
     elif name=="cars":
         return cars(use_input_norm)
+    elif name=="officehome_dil":
+        return officehome_dil(use_input_norm)
+    elif name=="dndil":
+        return dndil(use_input_norm)
     elif "core50" in name:
         logging.info('Starting next DIL task: '+name)
         return core50(name[7::],use_input_norm)

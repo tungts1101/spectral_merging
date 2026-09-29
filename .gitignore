@@ -1,4 +1,4 @@
-checkpoints_exp21/
-logs_exp21/
+checkpoints_main/
+logs_main/
 __pycache__/
 *.pt

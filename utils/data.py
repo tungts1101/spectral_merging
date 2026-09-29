@@ -14,7 +14,7 @@ from utils.toolkit import split_images_labels
 #        year = {2023}
 #    }
 
-DATA_ROOT = "/home/lis/data"
+DATA_ROOT = "/home/lis/data"  # was /mnt/data_drive/tung; mount disappeared 2026-09-16, local copy has identical layout
 os.makedirs(DATA_ROOT, exist_ok=True)
 
 def download_and_extract_dataset(dataset_name, file_id, train_subdir="train", test_subdir="test"):
@@ -420,4 +420,105 @@ class domainnet(iData):
             labels+=list(aa[:,1])
         self.test_data=np.array([f"{DATA_ROOT}/domainnet/"+x for x in files])
         self.test_targets=np.array([int(x) for x in labels])
+
+# ===================== Domain-incremental datasets =====================
+# Rebuilt to match E2-LoRA's domain_incremental_learning pipeline exactly
+# (github.com/kiddo127/E2-LoRA): per-domain image lists, labels offset by
+# session (label + task_id * classes_per_domain), Office-Home split 70/30
+# deterministically with numpy seed 1993, DomainNet using the official
+# cleaned train/test lists shipped with the dataset.
+# NOTE the class is named `dndil`, NOT containing the substring "domainnet",
+# because data_manager has a legacy 345-class branch keyed on that substring.
+
+def _dil_write_all_txt(root, domain, extensions=("jpg", "png", "jpeg")):
+    """E2-LoRA toolkit.write_domain_img_file2txt, verbatim behaviour."""
+    out = os.path.join(root, domain + "_all.txt")
+    if os.path.exists(out):
+        return
+    rows, dpath = [], os.path.join(root, domain)
+    cl_dirs = sorted(os.listdir(dpath))        # sorted => deterministic labels
+    for cl_idx, cl_name in enumerate(cl_dirs):
+        cpath = os.path.join(dpath, cl_name)
+        for img in sorted(os.listdir(cpath)):
+            if img.split(".")[-1].lower() in extensions:
+                rows.append(os.path.join(domain, cl_name, img) + " " + str(cl_idx) + "\n")
+    with open(out, "w") as f:
+        f.writelines(rows)
+
+
+def _dil_split_txt(root, domain, train_ratio=0.7, seed=1993):
+    """E2-LoRA toolkit.split_domain_txt2txt, verbatim behaviour."""
+    if os.path.exists(os.path.join(root, domain + "_train.txt")):
+        return
+    np.random.seed(seed)
+    with open(os.path.join(root, domain + "_all.txt")) as f:
+        lines = f.readlines()
+    np.random.shuffle(lines)
+    n = int(len(lines) * train_ratio)
+    with open(os.path.join(root, domain + "_train.txt"), "w") as f:
+        f.writelines(lines[:n])
+    with open(os.path.join(root, domain + "_test.txt"), "w") as f:
+        f.writelines(lines[n:])
+
+
+def _dil_load(root, domains, classes_per_domain, split):
+    x, y = [], []
+    for task_id, d in enumerate(domains):
+        path = os.path.join(root, f"{d}_{split}.txt")
+        with open(path) as f:
+            for line in f:
+                # rsplit: Office-Home paths contain a space ("Real World/...")
+                rel, lab = line.rstrip("\n").rsplit(" ", 1)
+                x.append(os.path.join(root, rel))
+                y.append(int(lab) + task_id * classes_per_domain)
+    return np.array(x), np.array(y)
+
+
+class officehome_dil(iData):
+    """Office-Home DIL: 4 domains x 65 classes, 70/30 split (seed 1993)."""
+    use_path = True
+    train_trsf = build_transform(True, None)
+    test_trsf = build_transform(False, None)
+    common_trsf = []
+    class_order = np.arange(4 * 65).tolist()
+    domains = ["Art", "Clipart", "Product", "Real World"]
+    classes_per_domain = 65
+
+    def __init__(self, use_input_norm=True):
+        if use_input_norm:
+            self.common_trsf = [transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+
+    def download_data(self):
+        root = os.path.join(DATA_ROOT, "OfficeHome")
+        for d in self.domains:
+            _dil_write_all_txt(root, d)
+            _dil_split_txt(root, d, train_ratio=0.7, seed=1993)
+        self.train_data, self.train_targets = _dil_load(
+            root, self.domains, self.classes_per_domain, "train")
+        self.test_data, self.test_targets = _dil_load(
+            root, self.domains, self.classes_per_domain, "test")
+
+
+class dndil(iData):
+    """DomainNet DIL: 6 domains x 345 classes, official cleaned splits."""
+    use_path = True
+    train_trsf = build_transform(True, None)
+    test_trsf = build_transform(False, None)
+    common_trsf = []
+    class_order = np.arange(6 * 345).tolist()
+    domains = ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"]
+    classes_per_domain = 345
+
+    def __init__(self, use_input_norm=True):
+        if use_input_norm:
+            self.common_trsf = [transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+
+    def download_data(self):
+        root = os.path.join(DATA_ROOT, "DomainNet")
+        self.train_data, self.train_targets = _dil_load(
+            root, self.domains, self.classes_per_domain, "train")
+        self.test_data, self.test_targets = _dil_load(
+            root, self.domains, self.classes_per_domain, "test")
 
