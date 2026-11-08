@@ -6,6 +6,7 @@ from torch.utils.checkpoint import checkpoint as grad_ckpt
 import timm
 from timm.models.layers import trunc_normal_
 from peft import get_peft_model, LoraConfig
+from merge_ops import UPDATE_OPS, spectral_step
 import numpy as np
 import logging
 import random
@@ -139,7 +140,8 @@ def truncate_energy(A, p):
     return ((U[:, :k] * S[:k]) @ Vh[:k, :]).to(A.dtype)
 
 
-def pspectral_merging(w_prev, w_new, p=0.5, alpha=1.0, variant="combine"):
+def pspectral_merging(w_prev, w_new, p=0.5, alpha=1.0, variant="combine",
+                      update_op="trunc"):
     """Energy-percentile spectral merge for LoRA adapters (4 variants).
 
     Incremental merge  C = W_prev + alpha * truncate_energy(W_new - W_prev, p),
@@ -150,7 +152,20 @@ def pspectral_merging(w_prev, w_new, p=0.5, alpha=1.0, variant="combine"):
       separate : truncate lora_A and lora_B updates separately (before multiply)
       combine  : truncate the effective update W = B@A, then re-factor to rank r
     Non-LoRA params (norms/biases) are merged by plain interpolation.
+
+    `update_op` (only_A variant; rebuttal E10, merge_ops.spectral_step) selects
+    the step applied to the lora_A update dA in place of truncation:
+      trunc     : alpha * truncate_energy(dA, p)            (default, unchanged)
+      clip      : keep every direction, cap the singular values at
+                  alpha * sigma_1(dA)  (same spectral norm as truncation)
+      scale_fro : scale the full dA by alpha * ||trunc_p(dA)||_F / ||dA||_F
+    lora_B and the non-LoRA params keep the alpha interpolation for every op;
+    the other variants accept 'trunc' only.
     """
+    if update_op not in UPDATE_OPS:
+        raise ValueError(f"unknown update_op {update_op!r}; expected one of {UPDATE_OPS}")
+    if update_op != "trunc" and variant != "only_A":
+        raise ValueError(f"update_op={update_op!r} is implemented for variant 'only_A' only")
     # Detect down/up (A/B) factor pairs by suffix, supporting multiple PEFT types:
     #   LoRA        : lora_A.default.weight (A=down [r,in]),  lora_B.default.weight (B=up [out,r])
     #   AdaptFormer : down_proj.weight      (A=down [r,in]),  up_proj.weight        (B=up [out,r])
@@ -177,7 +192,10 @@ def pspectral_merging(w_prev, w_new, p=0.5, alpha=1.0, variant="combine"):
         dA, dB = A_new - A_prev, B_new - B_prev
 
         if variant == "only_A":
-            merged[An] = (A_prev + alpha * truncate_energy(dA, p)).to(w_new[An].dtype)
+            # 'trunc' keeps the original expression (byte-identical result);
+            # the other ops are the E10 step controls at matched norm.
+            step = alpha * truncate_energy(dA, p) if update_op == "trunc" else spectral_step(dA, p, alpha, update_op)
+            merged[An] = (A_prev + step).to(w_new[An].dtype)
             merged[Bn] = (B_prev + alpha * dB).to(w_new[Bn].dtype)
         elif variant == "only_B":
             merged[An] = (A_prev + alpha * dA).to(w_new[An].dtype)

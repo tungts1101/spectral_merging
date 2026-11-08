@@ -18,6 +18,7 @@ composable with every recipe.
 
 Usage:
     python main.py --smoke              # tiny 2-task run of every recipe
+    python main.py --smoke-inflora      # the same plus the InfLoRA port (E15b)
     python main.py                      # controlled comparison sweep (default)
 """
 
@@ -31,7 +32,8 @@ import numpy as np
 import os
 import glob
 import math
-from utils.data_manager import DataManager
+import re
+from utils.data_manager import DataManager, DummyDataset
 import gc
 import time
 from helper import (
@@ -46,6 +48,31 @@ from helper import (
     get_backbone,
     ContinualLinear,
 )
+from merge_ops import lora_scale, step_norms, alpha_from_stat
+from driftsolve import (
+    GCV_GRID,
+    gcv_lambda,
+    ridge_identity_woodbury,
+    ridge_zero_woodbury,
+    solve_drift,
+)
+from covstats import (
+    COV_MODES,
+    JITTER as COV_JITTER,
+    fit_full,
+    fit_diag,
+    fit_lowrank,
+    scatter as cov_scatter,
+    shared_cov,
+    shared_scale_tril,
+    transport_diag,
+    transport_lowrank_U,
+    transport_full,
+    to_full_cov,
+    make_dist,
+    storage_floats,
+)
+from diagnostics import gaussian_errors, transport_gaussian, csv_append
 from backbones import (
     MERGE_FAMILY,
     build_recipe_backbone,
@@ -58,6 +85,7 @@ from backbones import (
     trainable_state,
     load_trainable_state,
 )
+import inflora_gpm   # InfLoRA port (E15b): threshold schedule, lr factor (NumPy only)
 from torch.distributions import MultivariateNormal
 import logging
 import sys
@@ -70,6 +98,26 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 g = torch.Generator()
 g.manual_seed(0)
+
+# Rebuttal instrumentation (every key defaults to off): CSV schemas of the
+# stage timers (E3, config stage_timing_csv) and of the drift-map diagnostics
+# (E9, config drift_diag_csv). Rows are appended by diagnostics.csv_append.
+TIMING_CSV_HEADER = ("dataset", "seed", "task", "stage", "seconds", "extra")
+DRIFTDIAG_CSV_HEADER = (
+    "dataset", "seed", "task", "group", "n_classes", "n_img",
+    "mean_rel_raw", "mean_rel_before", "mean_rel_after",
+    "mean_cos_raw", "mean_cos_before", "mean_cos_after",
+    "cov_relF_raw", "cov_relF_before", "cov_relF_after",
+    "symkl_raw", "symkl_before", "symkl_after",
+    "os_mean_rel_I", "os_mean_rel_W", "os_mean_rel_oracle",
+    "os_cov_relF_I", "os_cov_relF_W", "os_cov_relF_oracle",
+    "W_minus_I_F", "Wor_minus_I_F", "W_minus_Wor_F", "n_fit_new", "n_fit_old",
+)
+# Rebuttal data hook (E13 few-shot per task, E14 validation carve): the config
+# keys run_single_experiment forwards to DataManager. None of them lives in
+# BASE_CONFIG, so a key is present in a run's config only when its experiment
+# set it; the '[Data]' line is logged exactly then.
+DATA_HOOK_KEYS = ("data_val_frac", "data_val_seed", "data_fewshot_k", "data_subsample_seed")
 
 
 # ------------------------------------------------------------------
@@ -247,6 +295,52 @@ class Model21(nn.Module):
 HYBRID_METHODS = ("sgp_seqft", "nsp_seqft")
 
 
+def merge_tag(cfg):
+    """Tag that names a config's merged checkpoints ({prefix}_merged_{tag}_{t}.pt).
+
+    The one rule shared by Learner.merged_checkpoint and the cleanup block of
+    run_config_sweep. Existing configs keep their byte-identical legacy strings:
+        pspectral -> pspec_{variant}_p{p}_a{alpha}
+        kspectral -> kspec_{variant}_k{k}_a{alpha}
+        otherwise -> {method}_c{coef}
+    Rebuttal keys extend the pspectral tag only when they are set: an '{op}_'
+    token BEFORE the alpha token for merge_update_op != 'trunc'
+    (pspec_only_A_p0.9_clip_a0.3), and 'a{rule}{param}' in place of 'a{alpha}'
+    for merge_alpha_rule != 'fixed' (train_merge_alpha is never mutated, so an
+    adaptive chain resolves its own merged files). The op token sits before the
+    alpha token so that the cleanup glob of the plain cell, '*_merged_{tag}_*.pt'
+    with tag 'pspec_only_A_p0.9_a0.3', can never match the files of a clip or
+    scale_fro cell at the same alpha in a shared directory. The OPCM / NUFILT
+    rules of merging_sota (E15a) are named by their own parameters:
+        opcm_a{alpha}_{lam}  and  nufilt_rp{rp}_rv{rv}_rl{rl}_ad{0|1}.
+    Missing merge keys fall back to BASE_CONFIG (the cleanup block passes the
+    experiment overrides merged into a BASE_CONFIG copy).
+    """
+    def get(key):
+        return cfg[key] if key in cfg else BASE_CONFIG[key]
+
+    method = get("train_merge")
+    variant = cfg.get("spectral_variant", cfg.get("pspectral_variant", "only_A"))
+    if method == "pspectral":
+        rule = cfg.get("merge_alpha_rule", "fixed")
+        if rule == "fixed":
+            alpha_part = f"a{get('train_merge_alpha')}"
+        else:
+            alpha_part = f"a{rule}{cfg.get('merge_alpha_param', 1.0)}"
+        op = cfg.get("merge_update_op", "trunc")
+        op_part = "" if op == "trunc" else f"{op}_"
+        return f"pspec_{variant}_p{get('pspectral_p')}_{op_part}{alpha_part}"
+    if method == "kspectral":
+        return f"kspec_{variant}_k{get('train_merge_k')}_a{get('train_merge_alpha')}"
+    if method == "opcm":
+        return f"opcm_a{cfg.get('merge_opcm_alpha', 0.5)}_{cfg.get('merge_opcm_lam', 'adaptive')}"
+    if method == "nufilt":
+        return (f"nufilt_rp{cfg.get('merge_nufilt_rp', 128)}_rv{cfg.get('merge_nufilt_rv', 8)}"
+                f"_rl{cfg.get('merge_nufilt_rl', 64)}"
+                f"_ad{int(bool(cfg.get('merge_nufilt_adapt', False)))}")
+    return f"{method}_c{get('train_merge_coef')}"
+
+
 class Learner:
     def __init__(self, config):
         self._config = config
@@ -257,6 +351,9 @@ class Learner:
         self._is_seqft = self._method == "seqft" or self._method in HYBRID_METHODS
         # E2-LoRA: growing per-task pair lists, custom lifecycle
         self._is_e2 = self._method == "e2lora"
+        # InfLoRA (rebuttal E15b): merge-family path (fold, state cache) plus
+        # the two Gram hooks _inflora_before_train / _inflora_after_train.
+        self._is_inflora = self._method == "inflora"
         self._known_classes = 0
         self._total_classes = 0
         self._class_increments = []
@@ -265,6 +362,13 @@ class Learner:
         self._cls_to_task_idx = {}
         self._acc = 0.0
         self._acc_history = []
+        # Rebuttal E14: per-task grouped accuracies on the validation carve
+        # ([Evaluation-val] rows); stays empty without data_val_frac > 0.
+        self._mlp_matrix_val = []
+        # Rebuttal E15a: cross-task state of a stateful SOTA merge rule
+        # (merging_sota OPCM keeps lam_t and the task-vector norms here; NUFILT
+        # writes its per-step statistics). One dict per Learner, i.e. per seed.
+        self._merge_rule_state = {}
 
         backbone = get_backbone(config) if self._is_seqft else build_recipe_backbone(config)
         self.model = Model21(config, backbone)
@@ -351,7 +455,9 @@ class Learner:
         for task in range(num_tasks):
             self.before_task(task, data_manager)
             self.train()
+            t0 = self._tic()                     # stage_timing (E3); None when off
             self.eval()
+            self._toc(t0, "eval", classes=self._total_classes)
             self.after_task()
             # Early pruning: abandon runs that fall > margin below the best
             # run's per-task trajectory (search-time cutoff; from task es_from
@@ -437,7 +543,10 @@ class Learner:
         #    currently holds the state after task t-1; drift pairs and the KD
         #    teacher both need it after this task's training mutates it.
         #    (e2lora snapshots in before_task, while merged-A is still deployed.)
-        if not self._is_seqft and not self._is_e2 and self._cur_task > 0:
+        if (not self._is_seqft and not self._is_e2 and not self._is_inflora
+                and self._cur_task > 0):
+            # InfLoRA has no drift map and no teacher: skip the deep copy of the
+            # model (incl. the 12 x 768^2 DualGPM bases) that nothing consumes.
             self._snapshot_prev()
 
         # 2. KD teacher = previous-task feature extractor.
@@ -454,7 +563,9 @@ class Learner:
             )
 
         # 3+4. Train backbone + head, then finalize the feature extractor.
+        t0 = self._tic()                         # stage_timing (E3); None when off
         trained = self.train_backbone(train_loader)
+        self._toc(t0, "train", cached=int(not trained))
 
         if self._is_e2:
             if trained:
@@ -491,7 +602,20 @@ class Learner:
                     self._apply_inference_cap()
             else:
                 if self._config.get("train_merge", "none") != "none":
-                    self.merge()
+                    # Rebuttal E7: an adaptive damping alpha replaces the fixed
+                    # train_merge_alpha for this task only (config untouched).
+                    alpha_override = None
+                    if self._config.get("merge_alpha_rule", "fixed") != "fixed":
+                        alpha_override = self._adaptive_alpha(class_range)
+                    elif self._config.get("merge_log_featshift", False):
+                        self._feature_shift(class_range)   # '[FeatShift]' line only
+                    t0 = self._tic()
+                    self.merge(alpha_override=alpha_override)
+                    self._toc(t0, "merge", rule=self._config.get("train_merge"))
+                elif self._config.get("merge_log_stats", False):
+                    # Merge-less run: the deployed step is the raw update
+                    # W_t - W_{t-1}; log its norms ('[StepNorm]', E10 L2M arm).
+                    self._log_step_norm()
                 if self._config.get("infer_speccap"):
                     self._apply_inference_cap()
         else:
@@ -502,6 +626,11 @@ class Learner:
                 # folding here is equivalent and makes the post-task state
                 # well-defined for caching and Stage 2.
                 self.model.backbone.merge_lora_weights()
+                if self._is_inflora:
+                    # InfLoRA hook 2: post-fold Gram pass + DualGPM memory
+                    # update BEFORE the state save, so the cached state (and
+                    # the cache-hit path) carries the updated basis.
+                    self._inflora_after_train(train_loader)
                 if self._cache_enabled():
                     dtype = {"fp16": torch.float16, "fp32": None}[self._config.get("cache_dtype", "fp32")]
                     torch.save(trainable_state(self.model.backbone, dtype=dtype),
@@ -546,16 +675,38 @@ class Learner:
                 task_size = self._total_classes - self._known_classes
                 self._e2_native_ca(task_size)
             return
+        # Rebuttal instrumentation, both default off: stage_timing (E3) times
+        # every Stage-2 call; drift_diag (E9) measures the stored old-class
+        # statistics before / after the transport and feeds nothing back.
+        diag_on = self._config.get("drift_diag", False)
         if self._cur_task == 0:
             if train_ca or train_drift:
+                t0 = self._tic()
                 self.compute_multivariate_normal()
+                self._toc(t0, "stats", classes=self._total_classes - self._known_classes)
+                if diag_on:
+                    self._diag_store_raw()
         else:
             if train_ca or train_drift:
                 if train_drift:
+                    t0 = self._tic()
                     W = self.fit_drift_map(train_loader)
+                    self._toc(t0, "drift")
+                    before = self._diag_snapshot() if diag_on else None
                     self.transport_prototypes(W)
+                    if diag_on:
+                        t0 = self._tic()
+                        self.drift_diagnostics(W, before)
+                        self._toc(t0, "driftdiag")
+                t0 = self._tic()
                 self.compute_multivariate_normal()
+                self._toc(t0, "stats", classes=self._total_classes - self._known_classes)
+                if diag_on:
+                    self._diag_store_raw()
+                t0 = self._tic()
                 self.align(self.model.classifier)
+                self._toc(t0, "align", classes=self._total_classes,
+                          epochs=self._config.get("train_ca_epochs", 10))
 
     # ------------------------------------------------------------------
     # Merge-family plumbing
@@ -655,6 +806,67 @@ class Learner:
         logging.info(f"[Projection] Updated projection matrices after task {self._cur_task}")
 
     # ------------------------------------------------------------------
+    # InfLoRA hooks (rebuttal E15b; train_method "inflora" only)
+    # ------------------------------------------------------------------
+    # Upstream methods/inflora.py (InfLoRA._train) runs two no-grad passes over
+    # the task's shuffled, augmented train loader: pass 1 BEFORE training gives
+    # the per-block input Gram G_t = X^T X / n (their cur_matrix) from which the
+    # fixed down-projection A_t is designed; pass 2 AFTER training, with the
+    # trained branch active (here: folded, which is equivalent), feeds the
+    # DualGPM memory update. Both reuse compute_covariances on the qkv wrappers
+    # (lora_modules) and bypass update_projections, whose covariance EMA
+    # (cov_ema_decay) is the wrong statistic for DualGPM.
+
+    def _inflora_gram_loader(self, train_loader):
+        """Loader of the Gram passes. inflora_gram_mode 'train' (upstream): the
+        task's shuffled, augmented train loader; 'test': the same images with
+        the deterministic test transform (built like update_projections)."""
+        mode = self._config.get("inflora_gram_mode", "train")
+        if mode == "train":
+            return train_loader
+        if mode != "test":
+            raise ValueError(f"inflora_gram_mode must be 'train' or 'test', got {mode!r}")
+        class_range = np.arange(self._known_classes, self._total_classes)
+        gram_set = self.data_manager.get_dataset(class_range, source="train", mode="test")
+        return DataLoader(
+            gram_set, batch_size=128, shuffle=False,
+            num_workers=4, worker_init_fn=seed_worker, generator=g,
+        )
+
+    @torch.no_grad()
+    def _inflora_grams(self, loader):
+        """{block_{i}_attn_qkv: float64 (d, d) Gram X^T X / n} of the qkv inputs
+        (norm1(x), all tokens) -- upstream's cur_matrix; the SVDs run in NumPy
+        on the CPU (inflora_gpm), so torch's deterministic mode is untouched."""
+        covs = compute_covariances(self.model.backbone, loader)
+        return {k: v.detach().cpu().double().numpy() for k, v in covs.items() if v is not None}
+
+    def _inflora_before_train(self, train_loader):
+        """Hook 1 (train_backbone, right after the cache check): design A_t."""
+        rows = self.model.backbone.design_lora_A(
+            self._inflora_grams(self._inflora_gram_loader(train_loader)))
+        n_retain = sum(1 for r in rows if r[2] == "retain")
+        leak = max([r[3] for r in rows], default=0.0)
+        logging.info(
+            f"[InfLoRA] Task {self._cur_task}: A_t designed for {len(rows)} blocks "
+            f"(remove {len(rows) - n_retain} / retain {n_retain}) | max|A M| {leak:.3e}")
+
+    def _inflora_after_train(self, train_loader):
+        """Hook 2 (train, after the fold and before the state save): DualGPM
+        update at threshold lamb + (lame - lamb) t / T (upstream schedule;
+        T = number of sessions, 10 on every benchmark here)."""
+        thr = inflora_gpm.threshold_schedule(
+            self._config.get("inflora_lamb", 0.95), self._config.get("inflora_lame", 1.0),
+            self._cur_task, self.data_manager.nb_tasks)
+        rows = self.model.backbone.update_memory(
+            self._inflora_grams(self._inflora_gram_loader(train_loader)),
+            thr, dual=bool(self._config.get("inflora_dual", True)))
+        logging.info(
+            f"[InfLoRA] DualGPM task {self._cur_task} threshold {thr:.4f} | "
+            f"cols {[r[1] for r in rows]} | types {[r[2] for r in rows]} | "
+            f"changed {[r[3] for r in rows]}")
+
+    # ------------------------------------------------------------------
     # Training (unified loop; seqft epoch-mode == exp19.train_mlp)
     # ------------------------------------------------------------------
 
@@ -711,6 +923,12 @@ class Learner:
             self.model.cuda()
             return False
 
+        if self._is_inflora:
+            # InfLoRA hook 1: design the fixed down-projection A_t from the
+            # current task's input Grams. A cache hit returned above, so the
+            # Gram pass runs only when the task really trains.
+            self._inflora_before_train(train_loader)
+
         # first_task_lora: backbone adapted on task 0 only; later tasks train
         # the new head only (backbone frozen).
         head_only = (self._method == "first_task_lora" and self._cur_task > 0)
@@ -719,6 +937,15 @@ class Learner:
         logging.info(f"[Training] {self.model}")
 
         epochs = self._config["train_epochs"]
+        # Rebuttal E1 (train_epochs_small_task, default None): on mixed long
+        # splits a task with few classes trains for a different number of
+        # epochs ("5 epochs when a task has <= 4 classes"); unset -> unchanged.
+        small_epochs = self._config.get("train_epochs_small_task", None)
+        if small_epochs is not None:
+            task_size = self._total_classes - self._known_classes
+            if task_size <= int(self._config.get("train_small_task_max_classes", 4)):
+                epochs = int(small_epochs)
+                logging.info(f"[Training] small task ({task_size} classes): epochs={epochs}")
         base_lr = self._config["train_base_lr"]
         weight_decay = self._config["train_weight_decay"]
         head_lr = self._config.get("train_head_lr", None) or base_lr
@@ -809,6 +1036,39 @@ class Learner:
             logging.info(f"[SpecNorm] {len(spec_layers)} layers | "
                          f"penalty l_s={specreg} | cap={speccap} "
                          f"({self._config.get('speccap_mode', 'rescale')}, anchor={speccap_anchor})")
+
+        # L2 penalty toward the previously deployed module (rebuttal E10,
+        # training-time arm):  loss += l2m_weight * sum ||p - p_anchor||^2 / numel
+        # over every trainable LoRA tensor present in the anchor state (qkv,
+        # fc1, fc2 -- unlike specreg, which is qkv-only); numel is the total
+        # element count of those tensors, so the weight is a mean squared
+        # per-element deviation. The anchor follows the _get_prev_feature_model
+        # rule: the task-(t-1) trained state at t == 1 or in merge-less runs
+        # (where the penalty replaces merging), else the merged state M_{t-1}.
+        # Task 0 is never penalised; the default l2m_weight = 0 adds nothing.
+        l2m_weight = float(self._config.get("l2m_weight", 0.0))
+        l2m_pairs, l2m_numel = None, 0
+        if self._is_seqft and l2m_weight > 0 and self._cur_task > 0:
+            if self._cur_task == 1 or self._config.get("train_merge", "none") == "none":
+                anchor_ckpt = self.backbone_checkpoint(self._cur_task - 1)
+            else:
+                anchor_ckpt = self.merged_checkpoint(self._cur_task - 1)
+            anchor = torch.load(anchor_ckpt, map_location="cuda")
+            l2m_pairs = [
+                (p, anchor[name].detach().to(device=p.device, dtype=p.dtype))
+                for name, p in self.model.backbone.named_parameters()
+                if p.requires_grad and name in anchor
+            ]
+            l2m_numel = sum(p.numel() for p, _ in l2m_pairs)
+            del anchor
+            logging.info(f"[L2M] anchor={os.path.basename(anchor_ckpt)} "
+                         f"weight={l2m_weight} tensors={len(l2m_pairs)}")
+
+        def _l2m_penalty():
+            pen = 0.0
+            for p, a in l2m_pairs:
+                pen = pen + (p - a).pow(2).sum()
+            return pen / max(1, l2m_numel)
 
         def _spec_penalty():
             pen = 0.0
@@ -901,6 +1161,8 @@ class Learner:
                     loss = loss + self.distiller(x, z)
                 if spec_layers is not None and specreg > 0:
                     loss = loss + specreg * _spec_penalty()
+                if l2m_pairs is not None:
+                    loss = loss + l2m_weight * _l2m_penalty()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -920,10 +1182,19 @@ class Learner:
                     optimizer,
                     milestones=self._config.get("train_milestones", [40]),
                     gamma=self._config.get("train_lr_gamma", 0.1))
+            elif sched_name == "inflora_cosine":
+                # InfLoRA's per-epoch quarter cosine (upstream utils/schedulers.py
+                # CosineSchedule): lr * cos(99 pi e / (200 (K - 1))), i.e. the base
+                # lr at epoch 0 and 0.0157 lr at the last epoch; K <= 1 keeps the
+                # lr constant (the smoke configs train one epoch).
+                n_epochs = epochs
+                scheduler = optim.lr_scheduler.LambdaLR(
+                    optimizer, lambda e: inflora_gpm.cosine_lr_factor(e, n_epochs))
             else:
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
             for epoch in range(epochs):
                 total_loss, total_acc, total = 0.0, 0, 0
+                epoch_lr = optimizer.param_groups[0]["lr"]   # lr applied in this epoch
                 pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
                 for _, (_, _, x, y) in enumerate(pbar):
                     l, a, b = run_batch(x, y)
@@ -934,6 +1205,8 @@ class Learner:
                 logging.info(
                     f"[Training] Epoch {epoch + 1}/{epochs}, "
                     f"Loss: {total_loss / total:.4f}, Acc: {total_acc / total:.4f}"
+                    # InfLoRA only: the realised per-epoch lr (quarter-cosine check)
+                    + (f", lr: {epoch_lr:.3e}" if self._is_inflora else "")
                 )
         else:
             # Step mode (reference repo): per-step warmup-cosine schedule.
@@ -990,6 +1263,13 @@ class Learner:
                              f"mean {np.mean(dsig):.3f}, max {np.max(dsig):.3f} "
                              f"(cap {speccap} -- excess = projection error)")
 
+        if l2m_pairs is not None:
+            # Realised distance of the trained module from its anchor.
+            with torch.no_grad():
+                dist = math.sqrt(sum(float((p - a).pow(2).sum()) for p, a in l2m_pairs))
+            logging.info(f"[L2M] end-of-task ||W_t-anchor||_F={dist:.4f}")
+            l2m_pairs = None
+
         # Save training cache. Merge-family backbone state is saved post-fold
         # in train(); here we save the seqft LoRA state + the classifier.
         if self._is_seqft:
@@ -1013,36 +1293,65 @@ class Learner:
     # Evaluation (exp19)
     # ------------------------------------------------------------------
 
-    def eval(self):
-        test_set = self.data_manager.get_dataset(
-            np.arange(0, self._total_classes), source="test", mode="test"
+    def _predict(self, source, generator, til=False):
+        """Forward pass of the deployed model over classes [0, total) of `source`.
+
+        Returns (y_pred, y_true, y_pred_til) as numpy arrays. The test pass of
+        eval() calls it with the module generator g and batch 256: that is the
+        former inline loop (byte-identical; a DataLoader draws its worker base
+        seed from its generator, so the stream of g is consumed exactly as
+        before). The validation pass (rebuttal E14) passes a private generator,
+        so g, and with it the training of later tasks, is untouched.
+        til=True (eval_til) also returns the task-masked prediction: the argmax
+        restricted to the columns of each sample's own task (_class_increments),
+        accumulated per batch so no logits are kept; otherwise y_pred_til is None.
+        """
+        dataset = self.data_manager.get_dataset(
+            np.arange(0, self._total_classes), source=source, mode="test"
         )
-        test_loader = DataLoader(
-            test_set, batch_size=256, shuffle=False,
-            num_workers=4, worker_init_fn=seed_worker, generator=g,
+        loader = DataLoader(
+            dataset, batch_size=256, shuffle=False,
+            num_workers=4, worker_init_fn=seed_worker, generator=generator,
         )
 
         self.model.eval()
-        y_true, y_pred = [], []
+        y_true, y_pred, y_pred_til = [], [], []
+        if til:
+            # Column range (lo, hi) of the task that owns each class.
+            lo = torch.empty(self._total_classes, dtype=torch.long)
+            hi = torch.empty(self._total_classes, dtype=torch.long)
+            for a, b in self._class_increments:
+                lo[a:b + 1] = a
+                hi[a:b + 1] = b
+            lo, hi = lo.cuda(), hi.cuda()
 
         with torch.no_grad():
-            for _, (_, _, x, y) in enumerate(test_loader):
+            for _, (_, _, x, y) in enumerate(loader):
                 x, y = x.cuda(), y.cuda()
                 logits = self.model(x)
                 y_pred.append(logits.argmax(dim=1).cpu().numpy())
                 y_true.append(y.cpu().numpy())
+                if til:
+                    cols = torch.arange(logits.size(1), device=logits.device)
+                    mask = ((cols[None, :] >= lo[y][:, None])
+                            & (cols[None, :] <= hi[y][:, None]))
+                    y_pred_til.append(
+                        logits.masked_fill(~mask, float("-inf")).argmax(dim=1).cpu().numpy())
 
-        logging.info(f"[Evaluation] Task {self._cur_task}")
-        num_tasks = self._cur_task + 1
         y_true = np.concatenate(y_true)
         y_pred = np.concatenate(y_pred)
+        return y_pred, y_true, (np.concatenate(y_pred_til) if til else None)
 
-        # Domain-incremental scoring (E2-LoRA/DUCT convention): every session
-        # holds the SAME semantic classes, offset by session in the label
-        # space, so credit is given for the semantic class regardless of which
-        # domain block it was predicted in (pred % C == true % C). Exact-match
-        # scoring would additionally require identifying the domain, which is
-        # not the DIL task.
+    def _score(self, y_pred, y_true):
+        """(total acc, per-task grouped accs as floats) of one prediction vector.
+
+        The former inline block of eval(). Domain-incremental scoring
+        (E2-LoRA/DUCT convention): every session holds the SAME semantic
+        classes, offset by session in the label space, so credit is given for
+        the semantic class regardless of which domain block it was predicted
+        in (pred % C == true % C). Exact-match scoring would additionally
+        require identifying the domain, which is not the DIL task.
+        """
         dil_classes = self._config.get("dil_classes_per_domain", None)
         if dil_classes:
             correct = (y_pred % dil_classes) == (y_true % dil_classes)
@@ -1054,7 +1363,19 @@ class Learner:
                     correct[idxes].sum() * 100 / len(idxes), decimals=2))
         else:
             acc_total, grouped = accuracy(y_pred.T, y_true, self._class_increments)
-        grouped = [float(a) for a in grouped]
+        return acc_total, [float(a) for a in grouped]
+
+    def eval(self):
+        # Test pass: module generator g, batch 256 (the unchanged default path).
+        # eval_til (default False) additionally keeps the task-masked argmax.
+        y_pred, y_true, y_pred_til = self._predict(
+            "test", g, til=bool(self._config.get("eval_til", False)))
+
+        logging.info(f"[Evaluation] Task {self._cur_task}")
+        num_tasks = self._cur_task + 1
+
+        dil_classes = self._config.get("dil_classes_per_domain", None)
+        acc_total, grouped = self._score(y_pred, y_true)
         self._mlp_matrix.append(grouped)
         self._last_total_acc = float(acc_total)
         logging.info(f"[Evaluation] Total Acc: {acc_total:.2f}, Grouped: {grouped}")
@@ -1086,33 +1407,83 @@ class Learner:
         self._acc = asa
         self._acc_history.append(float(np.round(self._acc, 2)))
 
+        # Rebuttal (q6ZZ-W4) eval_til: task-incremental accuracy from the same
+        # logits, argmax restricted to each sample's own task columns.
+        if y_pred_til is not None:
+            acc_til, grouped_til = self._score(y_pred_til, y_true)
+            logging.info(f"[Evaluation-til] Total Acc: {acc_til:.2f}, Grouped: {grouped_til}")
+
+        # Rebuttal E14: the same evaluation on the validation carve (private
+        # generator, so the stream of g is untouched); selection statistics only.
+        if self._config.get("data_val_frac", 0.0) and self.data_manager.has_val:
+            y_pred_v, y_true_v, _ = self._predict("val", torch.Generator().manual_seed(0))
+            acc_v, grouped_v = self._score(y_pred_v, y_true_v)
+            self._mlp_matrix_val.append(grouped_v)
+            logging.info(f"[Evaluation-val] Total Acc: {acc_v:.2f}, Grouped: {grouped_v}")
+            mat_v = np.zeros((num_tasks, num_tasks))
+            for i in range(num_tasks):
+                for j in range(i + 1):
+                    mat_v[i, j] = self._mlp_matrix_val[i][j]
+            faa_v, ffm_v, ffd_v, asa_v = compute_metrics(mat_v)
+            logging.info(f"[Evaluation-val] FAA: {faa_v:.2f}, FFM: {ffm_v:.2f}, "
+                         f"FFD: {ffd_v:.2f}, ASA: {asa_v:.2f}")
+            self._faa_val, self._ffm_val, self._asa_val = faa_v, ffm_v, asa_v
+
     # ------------------------------------------------------------------
     # Stage 2: class Gaussians (exp19, verbatim)
     # ------------------------------------------------------------------
 
     def compute_multivariate_normal(self):
-        """Compute per-class Gaussian (mean + full covariance) from training features."""
+        """Compute per-class Gaussian (mean + full covariance) from training features.
+
+        train_ca_cov_mode (rebuttal E5). 'class' (default: one full covariance
+        per class) and 'shared_corr' are unchanged and materialise
+        _class_covs (C, d, d). The cheap modes never allocate that tensor:
+          'diag'    : _class_vars (C, d)                      covstats.fit_diag
+          'lowrank' : _class_lr_U (C, d, train_ca_cov_rank) + residual
+                      _class_vars                             covstats.fit_lowrank
+          'shared'  : _shared_scatter (d, d) pooled within-class scatter,
+                      _shared_n = sum_c (n_c - 1)             covstats.scatter
+        Any other string raises ValueError (it used to run the full model).
+        """
         logging.info(
             f"[Alignment] Computing class stats for classes "
             f"{self._known_classes}–{self._total_classes - 1}"
         )
         total_class = self._total_classes
         feature_dim = self.model.feature_dim
+        cov_mode = self._config.get("train_ca_cov_mode", "class")
+        if cov_mode not in COV_MODES:
+            raise ValueError(
+                f"unknown train_ca_cov_mode {cov_mode!r}; expected one of {COV_MODES}")
+        cov_rank = int(self._config.get("train_ca_cov_rank", 64))
+        cheap = cov_mode in ("diag", "lowrank", "shared")
 
         if not hasattr(self, "_class_means") or not hasattr(self, "_class_covs"):
             self._class_means = torch.zeros((total_class, feature_dim))
-            self._class_covs = torch.zeros((total_class, feature_dim, feature_dim))
+            # Cheap modes keep no (C, d, d) tensor at all (None, never grown).
+            self._class_covs = (None if cheap else
+                                torch.zeros((total_class, feature_dim, feature_dim)))
             self._class_vars = torch.zeros((total_class, feature_dim))
         else:
             new_means = torch.zeros((total_class, feature_dim))
             new_means[: self._known_classes] = self._class_means
             self._class_means = new_means
-            new_covs = torch.zeros((total_class, feature_dim, feature_dim))
-            new_covs[: self._known_classes] = self._class_covs
-            self._class_covs = new_covs
+            if self._class_covs is not None:
+                new_covs = torch.zeros((total_class, feature_dim, feature_dim))
+                new_covs[: self._known_classes] = self._class_covs
+                self._class_covs = new_covs
             new_vars = torch.zeros((total_class, feature_dim))
             new_vars[: self._known_classes] = self._class_vars
             self._class_vars = new_vars
+        if cov_mode == "lowrank":
+            new_U = torch.zeros((total_class, feature_dim, cov_rank))
+            if hasattr(self, "_class_lr_U"):
+                new_U[: self._known_classes] = self._class_lr_U
+            self._class_lr_U = new_U
+        if cov_mode == "shared" and not hasattr(self, "_shared_scatter"):
+            self._shared_scatter = torch.zeros((feature_dim, feature_dim), dtype=torch.double)
+            self._shared_n = 0
         if not hasattr(self, "_corr_accum"):
             self._corr_accum = torch.zeros((feature_dim, feature_dim), dtype=torch.double)
             self._corr_count = 0
@@ -1137,14 +1508,18 @@ class Learner:
                 logging.warning(f"[Stats] class {cls_idx} has no train samples; "
                                 f"using neutral stats")
                 self._class_means[cls_idx] = torch.zeros(feature_dim)
-                self._class_covs[cls_idx] = torch.eye(feature_dim) * 1e-4
+                if self._class_covs is not None:
+                    self._class_covs[cls_idx] = torch.eye(feature_dim) * 1e-4
+                else:
+                    # Cheap modes: jitter variance, zero factor, nothing pooled.
+                    self._class_vars[cls_idx] = torch.full((feature_dim,), 1e-4)
                 continue
             feats = torch.cat(feats, dim=0)
+            n_feats = feats.size(0)                      # before the duplication below
             if feats.size(0) == 1:
                 # torch.cov needs n>=2; duplicate -> zero cov + jitter below.
                 feats = torch.cat([feats, feats], dim=0)
             self._class_means[cls_idx] = feats.mean(dim=0)
-            cov_mode = self._config.get("train_ca_cov_mode", "class")
             if cov_mode == "shared_corr":
                 var = (feats.var(dim=0, unbiased=True)
                        if feats.size(0) > 1 else torch.ones(feature_dim))
@@ -1152,6 +1527,15 @@ class Learner:
                 z = (feats - self._class_means[cls_idx]) / (var + 1e-8).sqrt()
                 self._corr_accum += (z.T @ z).double()
                 self._corr_count += feats.size(0)
+            elif cov_mode == "diag":
+                self._class_vars[cls_idx] = fit_diag(feats)
+            elif cov_mode == "lowrank":
+                U, var_res = fit_lowrank(feats, cov_rank)
+                self._class_lr_U[cls_idx] = U
+                self._class_vars[cls_idx] = var_res
+            elif cov_mode == "shared":
+                self._shared_scatter += cov_scatter(feats)
+                self._shared_n += max(0, n_feats - 1)    # a duplicated single sample adds no dof
             else:
                 cov = torch.cov(feats.T)
                 gamma = self._config.get("train_ca_cov_shrinkage", 0.0)
@@ -1175,6 +1559,12 @@ class Learner:
                 f"[Alignment] shared_corr covs rebuilt for {self._total_classes} "
                 f"classes (gamma={gamma}, pooled n={self._corr_count})"
             )
+        if cheap:
+            # One line per task in the cheap modes only (default log unchanged).
+            logging.info(
+                f"[Alignment] cov_mode={cov_mode} "
+                f"rank={cov_rank if cov_mode == 'lowrank' else '-'} "
+                f"stats_floats={storage_floats(cov_mode, feature_dim, total_class, cov_rank)}")
 
     # ------------------------------------------------------------------
     # Stage 2: drift compensation (exp19; prev extractor is recipe-aware)
@@ -1186,6 +1576,7 @@ class Learner:
         features (exp19.fit_drift_map; the previous extractor comes from
         _get_prev_feature_model, which abstracts seqft vs merge family)."""
         logging.info(f"[Drift] Fitting ridge drift map for task {self._cur_task}")
+        t_feat = self._tic()      # stage_timing: previous-extractor reload + two feature passes
         old_model = self._get_prev_feature_model()
         self.model.eval()
 
@@ -1200,23 +1591,58 @@ class Learner:
         F_old = torch.cat(F_old, dim=0).double()
         F_new = torch.cat(F_new, dim=0).double()
         d = F_old.size(1)
+        self._toc(t_feat, "drift_features", n=F_old.size(0), d=d)
         lam = self._config.get("train_drift_lambda", 1e2)
         ridge_mode = self._config.get("train_drift_ridge", "zero")
-        A = F_old.T @ F_old + lam * torch.eye(d, dtype=torch.double)
-        if ridge_mode == "identity":
-            Cd = (F_new - F_old).T @ F_old
-            Delta = torch.linalg.solve(A, Cd.T).T
-            W = torch.eye(d, dtype=torch.double) + Delta
+        lambda_rule = self._config.get("train_drift_lambda_rule", None)
+        if lambda_rule == "gcv":
+            # Rebuttal E7b: data-free ridge lambda by closed-form generalised
+            # cross-validation on this task's paired features
+            # (driftsolve.gcv_lambda: one thin SVD of F_old serves the grid).
+            # No old data and no validation split; the chosen value feeds the
+            # unchanged solve below and appears as lambda in the '[Drift] W
+            # shape' line.
+            grid = [float(v) for v in self._config.get("train_drift_lambda_grid", list(GCV_GRID))]
+            lam, scores = gcv_lambda(F_old, F_new, grid, ridge=ridge_mode)
+            logging.info(
+                f"[Drift] lambda_rule=gcv chosen lambda={lam} | gcv "
+                + " ".join(f"{v:g}:{scores[v]:.6g}" for v in grid)
+            )
+        elif lambda_rule not in (None, "fixed"):
+            raise ValueError(f"unknown train_drift_lambda_rule {lambda_rule!r}")
+        solver = self._config.get("train_drift_solver", "dense")
+        t_solve = self._tic()     # stage_timing: the ridge solve alone
+        if solver == "dense":
+            A = F_old.T @ F_old + lam * torch.eye(d, dtype=torch.double)
+            if ridge_mode == "identity":
+                Cd = (F_new - F_old).T @ F_old
+                Delta = torch.linalg.solve(A, Cd.T).T
+                W = torch.eye(d, dtype=torch.double) + Delta
+            else:
+                C = F_new.T @ F_old
+                W = torch.linalg.solve(A, C.T).T
+        elif solver == "woodbury":
+            # Rebuttal E3: push-through form of the same ridge, an (n, n)
+            # solve instead of (d, d) (driftsolve; equal to the dense solve
+            # up to float64 round-off).
+            if ridge_mode == "identity":
+                W = ridge_identity_woodbury(F_old, F_new, lam)
+            else:
+                W = ridge_zero_woodbury(F_old, F_new, lam)
         else:
-            C = F_new.T @ F_old
-            W = torch.linalg.solve(A, C.T).T
+            raise ValueError(f"unknown train_drift_solver {solver!r} (dense | woodbury)")
+        self._toc(t_solve, "drift_solve", n=F_old.size(0), d=d, solver=solver)
+        # Realised fit parameters, reused by the E9 oracle map and its CSV.
+        self._drift_lambda_used = lam
+        self._drift_fit_n = int(F_old.size(0))
         pred = F_old @ W.T
         cos = F.cosine_similarity(pred, F_new, dim=1).mean().item()
         dI = (W - torch.eye(d, dtype=torch.double)).norm().item()
+        solver_note = "" if solver == "dense" else f", solver={solver}"
         logging.info(
             f"[Drift] W shape {tuple(W.shape)}, ||W||={W.norm().item():.3f}, "
             f"||W-I||={dI:.3f}, mean cos(W·f_(t-1), f_t)={cos:.4f} "
-            f"over {F_old.size(0)} samples (λ={lam}, ridge={ridge_mode})"
+            f"over {F_old.size(0)} samples (λ={lam}, ridge={ridge_mode}{solver_note})"
         )
         return W.float()
 
@@ -1226,15 +1652,32 @@ class Learner:
             return
         mode = self._config.get("train_drift_transport", "full")
         logging.info(f"[Drift] Transporting {K} old-class prototypes (mode={mode})")
+        t0 = self._tic()
+        cov_mode = self._config.get("train_ca_cov_mode", "class")
         Wc = W.cpu().double()
         feature_dim = Wc.size(0)
         means = self._class_means[:K].double()
         self._class_means[:K] = (means @ Wc.T).float()
         if mode == "full":
-            for c in range(K):
-                S = Wc @ self._class_covs[c].double() @ Wc.T
-                S = 0.5 * (S + S.T) + torch.eye(feature_dim, dtype=torch.double) * 1e-4
-                self._class_covs[c] = S.float()
+            if cov_mode in ("class", "shared_corr"):
+                for c in range(K):
+                    S = Wc @ self._class_covs[c].double() @ Wc.T
+                    S = 0.5 * (S + S.T) + torch.eye(feature_dim, dtype=torch.double) * 1e-4
+                    self._class_covs[c] = S.float()
+            elif cov_mode == "diag":
+                # Rebuttal E5: v' = (W o W) v, the exact diagonal of W diag(v) W^T,
+                # plus the 1e-4 jitter the full path adds at every transport.
+                self._class_vars[:K] = transport_diag(self._class_vars[:K], Wc, jitter=COV_JITTER)
+            elif cov_mode == "lowrank":
+                # (W U)(W U)^T + W diag(v) W^T; the residual keeps its exact diagonal.
+                self._class_lr_U[:K] = transport_lowrank_U(self._class_lr_U[:K], Wc)
+                self._class_vars[:K] = transport_diag(self._class_vars[:K], Wc, jitter=COV_JITTER)
+            elif cov_mode == "shared":
+                # One W S W^T on the pooled old-class scatter (linear in S, so
+                # equal to transporting every class's scatter); the new task's
+                # scatter is pooled afterwards in compute_multivariate_normal.
+                self._shared_scatter = transport_full(self._shared_scatter, Wc, jitter=0.0)
+        self._toc(t0, "transport", K=K, mode=mode, cov_mode=cov_mode)
 
     # ------------------------------------------------------------------
     # Stage 2: LCA alignment (exp19, verbatim)
@@ -1268,11 +1711,16 @@ class Learner:
 
         optimizer = optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9, weight_decay=1e-4)
 
+        cov_mode = self._config.get("train_ca_cov_mode", "class")
         dists = []
-        for cls_idx in range(self._total_classes):
-            mu = self._class_means[cls_idx].to(device).float()
-            cov = self._class_covs[cls_idx].to(device).float()
-            dists.append(MultivariateNormal(mu, cov))
+        if cov_mode in ("class", "shared_corr"):
+            for cls_idx in range(self._total_classes):
+                mu = self._class_means[cls_idx].to(device).float()
+                cov = self._class_covs[cls_idx].to(device).float()
+                dists.append(MultivariateNormal(mu, cov))
+        else:
+            # Rebuttal E5: diag / lowrank / shared sampling distributions.
+            dists = self._cheap_dists(cov_mode, device)
 
         sampled_label = torch.cat([
             torch.full((samples_per_cls,), c, dtype=torch.long, device=device)
@@ -1401,6 +1849,298 @@ class Learner:
                 )
 
     # ------------------------------------------------------------------
+    # Rebuttal instrumentation: stage timers (E3), cheap class statistics
+    # (E5) and drift-map diagnostics (E9). Every entry point is gated by a
+    # config key that defaults to the current behaviour.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sync_now():
+        '''perf_counter after a CUDA synchronize: the one clock behind every
+        timer in this file (stage timers and the [MergeStat] merge_time).'''
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return time.perf_counter()
+
+    def _tic(self):
+        '''Start of a stage timer: _sync_now() when config stage_timing is on,
+        else None (then the matching _toc is a no-op), so a timed call site is
+        `t0 = self._tic(); ...; self._toc(t0, "stage", k=v)` with no branch.'''
+        if self._config.get("stage_timing", False):
+            return self._sync_now()
+        return None
+
+    def _toc(self, t0, stage, **extra):
+        if t0 is None:
+            return
+        self._log_timing(stage, self._sync_now() - t0, **extra)
+
+    def _log_timing(self, stage, sec, **extra):
+        '''One '[Timing] task {t} {stage}={sec:.3f}s k=v ...' line and, when
+        config stage_timing_csv is set, one appended CSV row
+        (TIMING_CSV_HEADER: dataset, seed, task, stage, seconds, extra).
+        Stages: train (cached=0|1), merge (rule), drift (whole fit_drift_map),
+        drift_features (n, d), drift_solve (n, d, solver), transport (K, mode,
+        cov_mode), stats (classes), align (classes, epochs), eval (classes),
+        driftdiag (E9 overhead).'''
+        extras = " ".join(f"{k}={v}" for k, v in extra.items())
+        logging.info(f"[Timing] task {self._cur_task} {stage}={sec:.3f}s"
+                     + (f" {extras}" if extras else ""))
+        path = self._config.get("stage_timing_csv", None)
+        if path:
+            csv_append(path, TIMING_CSV_HEADER, [{
+                "dataset": self._config.get("dataset_name", ""),
+                "seed": self._config.get("seed", ""),
+                "task": self._cur_task, "stage": stage,
+                "seconds": f"{sec:.6f}", "extra": extras,
+            }])
+
+    def _cheap_dists(self, cov_mode, device):
+        '''Sampling distributions of align() for the cheap statistics
+        (covstats.make_dist): 'diag' -> Independent(Normal(mu, sqrt(var))),
+        'lowrank' -> LowRankMultivariateNormal(mu, U, var), 'shared' ->
+        MultivariateNormal(mu, scale_tril=L) with ONE Cholesky factor of the
+        pooled covariance per align() call. align() only calls .sample() on
+        them, so the rest of the alignment loop is untouched.'''
+        shared_L = None
+        if cov_mode == "shared":
+            shared_L = shared_scale_tril(self._shared_scatter, self._shared_n).to(device)
+        dists = []
+        for c in range(self._total_classes):
+            mu = self._class_means[c]
+            if cov_mode == "diag":
+                dists.append(make_dist("diag", mu, var=self._class_vars[c], device=device))
+            elif cov_mode == "lowrank":
+                dists.append(make_dist("lowrank", mu, var=self._class_vars[c],
+                                       U=self._class_lr_U[c], device=device))
+            else:
+                dists.append(make_dist("shared", mu, shared_L=shared_L, device=device))
+        return dists
+
+    # -- E9 drift-map diagnostics (config drift_diag; evaluation only) --------
+
+    def _diag_snapshot(self, n=None, clone=True):
+        '''The stored statistics of classes [0, n) (default: the old classes)
+        in the current covariance mode as a dict {mode, means, covs | vars |
+        vars + U | shared}; clones by default (diagnostic storage only).'''
+        if n is None:
+            n = self._known_classes
+        mode = self._config.get("train_ca_cov_mode", "class")
+        take = (lambda x: x.clone()) if clone else (lambda x: x)
+        snap = {"mode": mode, "means": take(self._class_means[:n])}
+        if mode in ("class", "shared_corr"):
+            snap["covs"] = take(self._class_covs[:n])
+        elif mode == "diag":
+            snap["vars"] = take(self._class_vars[:n])
+        elif mode == "lowrank":
+            snap["vars"] = take(self._class_vars[:n])
+            snap["U"] = take(self._class_lr_U[:n])
+        else:
+            snap["shared"] = shared_cov(self._shared_scatter, self._shared_n)
+        return snap
+
+    @staticmethod
+    def _diag_cov_full(snap, c):
+        '''(d, d) covariance of class c implied by a _diag_snapshot
+        (covstats.to_full_cov on the mode's representation).'''
+        mode = snap["mode"]
+        if mode in ("class", "shared_corr"):
+            return snap["covs"][c]
+        if mode == "diag":
+            return to_full_cov("diag", var=snap["vars"][c])
+        if mode == "lowrank":
+            return to_full_cov("lowrank", U=snap["U"][c], var=snap["vars"][c])
+        return snap["shared"]
+
+    def _diag_store_raw(self):
+        '''Never-transported copy of every class's statistics as fitted at its
+        own task (the 'raw' = no-correction-ever curve of the E9 diagnostics):
+        grows _diag_raw_means (C, d) / _diag_raw_covs (C, d, d) with the rows
+        [known, total) of the statistics just computed. Diagnostic storage
+        only (a second (C, d, d) CPU tensor, not part of the method's memory
+        accounting).'''
+        total, d = self._total_classes, self.model.feature_dim
+        if not hasattr(self, "_diag_raw_means"):
+            self._diag_raw_means = torch.zeros((total, d))
+            self._diag_raw_covs = torch.zeros((total, d, d))
+        else:
+            new_means = torch.zeros((total, d))
+            new_means[: self._known_classes] = self._diag_raw_means
+            self._diag_raw_means = new_means
+            new_covs = torch.zeros((total, d, d))
+            new_covs[: self._known_classes] = self._diag_raw_covs
+            self._diag_raw_covs = new_covs
+        live = self._diag_snapshot(total, clone=False)
+        for c in range(self._known_classes, total):
+            self._diag_raw_means[c] = live["means"][c]
+            self._diag_raw_covs[c] = self._diag_cov_full(live, c)
+
+    @torch.no_grad()
+    def drift_diagnostics(self, W, before):
+        '''Rebuttal E9: how well the stored old-class Gaussians match the
+        deployed extractor M_t, before and after the drift transport, next to
+        the never-corrected statistics ('raw') and a one-step comparison
+        (identity / the fitted W / an oracle W fitted on the old-class pairs
+        themselves with the same ridge anchor and lambda, driftsolve).
+
+        Evaluation only: the old-class images are never stored by the method,
+        nothing is written back to the class statistics, and the global RNG
+        (CPU + CUDA) is restored afterwards (torch.random.fork_rng, a private
+        np.random.RandomState for the subsample, a private torch.Generator for
+        the loader), so the accuracy trajectory equals a run without it.
+
+        Keys (read only when drift_diag is True): drift_diag_source ('train' =
+        the same images and deterministic transform as
+        compute_multivariate_normal, so est-vs-ref isolates the transport
+        error; 'test' = held-out images), drift_diag_max_per_class (100; 0 =
+        all), drift_diag_seed (0), drift_diag_onestep (True), drift_diag_kl
+        (False), drift_diag_csv (None). Logs one '[DriftDiag]' line per task
+        and appends one CSV row per (task, old-task group) plus 'all'
+        (DRIFTDIAG_CSV_HEADER). Errors: diagnostics.gaussian_errors.'''
+        K = self._known_classes
+        if before is None or K == 0:
+            return
+        if not hasattr(self, "_diag_raw_means") or self._diag_raw_means.size(0) < K:
+            logging.warning("[DriftDiag] raw statistics missing; skipping")
+            return
+        cfg = self._config
+        src = cfg.get("drift_diag_source", "train")
+        max_pc = int(cfg.get("drift_diag_max_per_class", 100))
+        seed = int(cfg.get("drift_diag_seed", 0))
+        onestep = bool(cfg.get("drift_diag_onestep", True))
+        use_kl = bool(cfg.get("drift_diag_kl", False))
+        csv_path = cfg.get("drift_diag_csv", None)
+        t = self._cur_task
+        after = self._diag_snapshot()
+        raw = {"mode": "class", "means": self._diag_raw_means[:K],
+               "covs": self._diag_raw_covs[:K]}
+
+        # Features of the old classes under M_t (and M_{t-1} for the one-step
+        # view) from a seeded per-class subsample; private RNG everywhere.
+        devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+        with torch.random.fork_rng(devices=devices):
+            ds = self.data_manager.get_dataset(np.arange(0, K), source=src, mode="test")
+            labels = np.asarray(ds.labels)
+            if max_pc > 0:
+                rs = np.random.RandomState(seed)
+                keep = []
+                for c in range(K):
+                    idx = np.where(labels == c)[0]
+                    if len(idx) > max_pc:
+                        idx = np.sort(rs.choice(idx, max_pc, replace=False))
+                    keep.append(idx)
+                keep = np.concatenate(keep) if keep else np.zeros(0, dtype=np.int64)
+                ds = DummyDataset(ds.images[keep], labels[keep], ds.trsf, ds.use_path)
+            gen = torch.Generator()
+            gen.manual_seed(seed)
+            loader = DataLoader(ds, batch_size=256, shuffle=False, num_workers=4,
+                                worker_init_fn=seed_worker, generator=gen)
+            old_model = self._get_prev_feature_model() if onestep else None
+            self.model.eval()
+            F_cur, F_prev, ys = [], [], []
+            for _, (_, _, x, y) in enumerate(loader):
+                x = x.cuda()
+                F_cur.append(self.model.get_features(x).cpu())
+                if old_model is not None:
+                    F_prev.append(old_model.get_features(x).cpu())
+                ys.append(torch.as_tensor(y))
+            if old_model is not None:
+                self._release_prev_feature_model(old_model)
+        if not ys:
+            logging.warning(f"[DriftDiag] task {t}: no old-class images in source {src!r}")
+            return
+        F_cur = torch.cat(F_cur, dim=0).float()
+        F_prev = torch.cat(F_prev, dim=0).float() if onestep else None
+        y = torch.cat(ys).numpy()
+        n_img = int(len(y))
+
+        # One-step maps: the fitted W of this task and the oracle fitted on the
+        # old-class pairs with the same anchor and lambda (dense solve).
+        Wd = W.detach().cpu().double()
+        d = Wd.size(0)
+        eye_d = torch.eye(d, dtype=torch.double)
+        lam = getattr(self, "_drift_lambda_used", cfg.get("train_drift_lambda", 1e2))
+        ridge_mode = cfg.get("train_drift_ridge", "zero")
+        W_or = None
+        if onestep:
+            W_or = solve_drift(F_prev.double(), F_cur.double(), lam,
+                               ridge=ridge_mode, solver="dense")
+
+        rows = []
+        for c in range(K):
+            idx = torch.from_numpy(np.where(y == c)[0])
+            if idx.numel() < 2:
+                continue
+            mu_ref, cov_ref = fit_full(F_cur[idx])
+            row = {"group": int(self._cls_to_task_idx.get(c, -1)), "n_img": int(idx.numel())}
+            for name, snap in (("raw", raw), ("before", before), ("after", after)):
+                err = gaussian_errors(snap["means"][c], self._diag_cov_full(snap, c),
+                                      mu_ref, cov_ref, kl=use_kl)
+                row[f"mean_rel_{name}"] = err["mean_rel"]
+                row[f"mean_cos_{name}"] = err["mean_cos"]
+                row[f"cov_relF_{name}"] = err["cov_relF"]
+                if use_kl:
+                    row[f"symkl_{name}"] = err["symkl"]
+            if onestep:
+                mu_p, cov_p = fit_full(F_prev[idx])          # true stats under M_{t-1}
+                e_i = gaussian_errors(mu_p, cov_p, mu_ref, cov_ref)
+                mu_w, cov_w = transport_gaussian(mu_p, cov_p, Wd)
+                e_w = gaussian_errors(mu_w, cov_w, mu_ref, cov_ref)
+                mu_o, cov_o = transport_gaussian(mu_p, cov_p, W_or)
+                e_o = gaussian_errors(mu_o, cov_o, mu_ref, cov_ref)
+                row.update({
+                    "os_mean_rel_I": e_i["mean_rel"], "os_mean_rel_W": e_w["mean_rel"],
+                    "os_mean_rel_oracle": e_o["mean_rel"],
+                    "os_cov_relF_I": e_i["cov_relF"], "os_cov_relF_W": e_w["cov_relF"],
+                    "os_cov_relF_oracle": e_o["cov_relF"],
+                })
+            rows.append(row)
+        if not rows:
+            logging.warning(f"[DriftDiag] task {t}: no old class with >= 2 images")
+            return
+
+        # Means over classes per old-task group and overall ('all').
+        metric_keys = [k for k in DRIFTDIAG_CSV_HEADER
+                       if k.startswith(("mean_", "cov_", "symkl_", "os_"))]
+
+        def _agg(rs):
+            out = {"n_classes": len(rs), "n_img": sum(r["n_img"] for r in rs)}
+            for k in metric_keys:
+                vals = [r[k] for r in rs if k in r]
+                if vals:
+                    out[k] = sum(vals) / len(vals)
+            return out
+
+        groups = [("all", rows)] + [
+            (str(gid), [r for r in rows if r["group"] == gid])
+            for gid in sorted({r["group"] for r in rows})]
+        agg = {name: _agg(rs) for name, rs in groups}
+        a = agg["all"]
+        msg = (f"[DriftDiag] task {t} K={K} n_img={n_img} src={src} | "
+               f"mean_rel raw={a['mean_rel_raw']:.4f} before={a['mean_rel_before']:.4f} "
+               f"after={a['mean_rel_after']:.4f} | "
+               f"cov_relF raw={a['cov_relF_raw']:.4f} before={a['cov_relF_before']:.4f} "
+               f"after={a['cov_relF_after']:.4f}")
+        if onestep:
+            msg += (f" | onestep mean_rel I={a['os_mean_rel_I']:.4f} W={a['os_mean_rel_W']:.4f} "
+                    f"oracle={a['os_mean_rel_oracle']:.4f} "
+                    f"cov_relF I={a['os_cov_relF_I']:.4f} W={a['os_cov_relF_W']:.4f} "
+                    f"oracle={a['os_cov_relF_oracle']:.4f}")
+        logging.info(msg)
+
+        if csv_path:
+            base = {
+                "dataset": cfg.get("dataset_name", ""), "seed": cfg.get("seed", ""),
+                "task": t, "W_minus_I_F": (Wd - eye_d).norm().item(),
+                "n_fit_new": getattr(self, "_drift_fit_n", ""), "n_fit_old": n_img,
+            }
+            if W_or is not None:
+                base["Wor_minus_I_F"] = (W_or - eye_d).norm().item()
+                base["W_minus_Wor_F"] = (Wd - W_or).norm().item()
+            csv_append(csv_path, DRIFTDIAG_CSV_HEADER,
+                       [dict(base, group=name, **vals) for name, vals in agg.items()])
+
+    # ------------------------------------------------------------------
     # E2-LoRA native classifier stage (port of e2lora.py:_compute_class_mean
     # + _stage2_compact_classifier; logit_norm disabled as in their IN-R cfg)
     # ------------------------------------------------------------------
@@ -1508,13 +2248,207 @@ class Learner:
     # Merge (seqft only; exp19.merge with kspectral/pspectral)
     # ------------------------------------------------------------------
 
+    # -- rebuttal helpers (default-off keys merge_log_stats / merge_alpha_rule) --
+
+    @staticmethod
+    def _merge_tic(enabled):
+        '''perf_counter after a CUDA sync when merge_log_stats is on (the
+        spectral merge runs its SVDs on the GPU); None otherwise, so the
+        default path neither syncs nor times anything. Same synchronised
+        clock as the stage timers (_sync_now; one timing helper, plan rule 1).'''
+        return Learner._sync_now() if enabled else None
+
+    @staticmethod
+    def _merge_toc(t0):
+        return Learner._sync_now() - t0
+
+    def _prev_deployed_checkpoint(self):
+        '''Checkpoint of the module deployed after task t-1 for a merging run:
+        the task-0 state at t == 1 (no merged file exists for task 0), else
+        M_{t-1}. Same rule as the merge branches and _get_prev_feature_model
+        (merge-less runs use backbone_checkpoint(t-1) instead).'''
+        if self._cur_task == 1:
+            return self.backbone_checkpoint(0)
+        return self.merged_checkpoint(self._cur_task - 1)
+
+    def _lora_scale(self):
+        '''PEFT scaling of the effective update, alpha / r (2 at r=64, alpha=128).'''
+        return lora_scale(self._config["model_lora_alpha"], self._config["model_lora_r"])
+
+    @staticmethod
+    def _norm_fields(agg):
+        '''Shared field block of the [MergeStat] / [StepNorm] lines from a
+        merge_ops.step_norms aggregate: sigma_max of the lora_A step and of the
+        effective-weight step scale * (B A - B' A'), plus its Frobenius norm.'''
+        return (f"A_sigma_max_mean={agg['sigma1_A_mean']:.5g} "
+                f"A_sigma_max_max={agg['sigma1_A_max']:.5g} | "
+                f"eff_sigma_max_mean={agg['sigma1_eff_mean']:.5g} "
+                f"eff_sigma_max_max={agg['sigma1_eff_max']:.5g} "
+                f"eff_fro_mean={agg['fro_eff_mean']:.5g}")
+
+    @torch.no_grad()
+    def _log_merge_stat(self, w_prev, w_new, merged, merge_time, alpha=None, op=None):
+        '''One '[MergeStat]' line per merge (config merge_log_stats; plan S4):
+        realised step norms w_prev -> merged, the raw-update norms
+        w_prev -> w_new, the kept rank k(p) of the raw lora_A updates at
+        pspectral_p (spectral branches only, with the realised alpha and the
+        update op) and the merge wall-clock. Statistics: merge_ops.step_norms
+        (k follows the exact helper.truncate_energy rule; k = 0 marks a
+        degenerate pair). The SOTA / classical branches log the reduced line
+        without the alpha / k fields.'''
+        p = self._config.get("pspectral_p", 0.9)
+        scale = self._lora_scale()
+        real = step_norms(w_prev, merged, scale, p)["agg"]
+        raw = step_norms(w_prev, w_new, scale, p)["agg"]
+        head = f"[MergeStat] task {self._cur_task}"
+        if real.get("n_pairs", 0) == 0:
+            logging.info(f"{head} no LoRA factor pairs | merge_time={merge_time:.3f}s")
+            return
+        if alpha is not None:
+            head += f" alpha={alpha}"
+            if op is not None:
+                head += f" op={op}"
+            head += f" k_mean={raw['k_mean']:.2f} k_min={raw['k_min']} k_max={raw['k_max']}"
+        logging.info(
+            f"{head} | {self._norm_fields(real)} | "
+            f"raw_sigma_max_mean={raw['sigma1_A_mean']:.5g} "
+            f"raw_eff_sigma_max_mean={raw['sigma1_eff_mean']:.5g} | "
+            f"merge_time={merge_time:.3f}s")
+
+    @torch.no_grad()
+    def _log_step_norm(self):
+        '''One '[StepNorm]' line per task for merge-less seqft runs
+        (train_merge == 'none' with merge_log_stats): norms of the raw update
+        W_t - W_{t-1}, which IS the deployed step there. The E10 L2M pilot reads
+        eff_sigma_max from it next to the [MergeStat] line of the truncation
+        run (same fields, same merge_ops.step_norms arithmetic).'''
+        w_prev = torch.load(self.backbone_checkpoint(self._cur_task - 1))
+        w_new = torch.load(self.backbone_checkpoint(self._cur_task))
+        agg = step_norms(w_prev, w_new, self._lora_scale(),
+                         self._config.get("pspectral_p", 0.9))["agg"]
+        if agg.get("n_pairs", 0) == 0:
+            logging.info(f"[StepNorm] task {self._cur_task} no LoRA factor pairs")
+            return
+        logging.info(
+            f"[StepNorm] task {self._cur_task} k_mean={agg['k_mean']:.2f} "
+            f"k_min={agg['k_min']} k_max={agg['k_max']} | {self._norm_fields(agg)}")
+
+    def _adaptive_alpha(self, class_range):
+        '''Per-task damping alpha for the pspectral merge (rebuttal E7).
+
+        merge_alpha_rule:
+          'specnorm'  : s_t = mean over the LoRA pairs of sigma_max of the raw
+                        update W_t - M_{t-1}, in the effective-weight space
+                        (merge_alpha_stat 'eff', default) or the lora_A space
+                        ('A'); needs no data (merge_ops.step_norms on the
+                        cached states).
+          'featshift' : s_t = relative feature shift of the current task's
+                        images between M_{t-1} and W_t (_feature_shift).
+        alpha_t = clip(merge_alpha_param / s_t, merge_alpha_min, 1)
+        (merge_ops.alpha_from_stat). Logs the realised value; never writes
+        train_merge_alpha, so merged_checkpoint(t-1) stays resolvable.
+        '''
+        rule = self._config.get("merge_alpha_rule", "fixed")
+        if rule == "fixed":
+            return None
+        if self._config.get("train_merge") != "pspectral":
+            raise ValueError("merge_alpha_rule requires train_merge='pspectral'")
+        param = float(self._config.get("merge_alpha_param", 1.0))
+        alpha_min = float(self._config.get("merge_alpha_min", 0.05))
+        if rule == "specnorm":
+            stat = self._config.get("merge_alpha_stat", "eff")
+            if stat not in ("eff", "A"):
+                raise ValueError(f"unknown merge_alpha_stat {stat!r} (expected 'eff' or 'A')")
+            with torch.no_grad():
+                w_prev = torch.load(self._prev_deployed_checkpoint())
+                w_new = torch.load(self.backbone_checkpoint(self._cur_task))
+                agg = step_norms(w_prev, w_new, self._lora_scale(),
+                                 self._config.get("pspectral_p", 0.9))["agg"]
+            key = "sigma1_eff_mean" if stat == "eff" else "sigma1_A_mean"
+            s_t = float(agg[key]) if agg.get("n_pairs", 0) else 0.0
+        elif rule == "featshift":
+            stat = "shift"
+            s_t = self._feature_shift(class_range)
+        else:
+            raise ValueError(f"unknown merge_alpha_rule {rule!r}")
+        alpha = alpha_from_stat(s_t, param, alpha_min, 1.0)
+        logging.info(f"[Merging] adaptive alpha rule={rule} stat={stat} "
+                     f"s_t={s_t:.6g} -> alpha={alpha:.4f}")
+        return alpha
+
+    @torch.no_grad()
+    def _feature_shift(self, class_range):
+        '''Relative feature shift of the current task's training images
+        between the previously deployed extractor M_{t-1} (reloaded through
+        _get_prev_feature_model) and the freshly trained W_t held by
+        self.model:
+            s_t = mean_i ||f_t(x_i) - f_{t-1}(x_i)|| / mean_i ||f_{t-1}(x_i)||.
+        Deterministic transform (mode='test'), no shuffling and a private
+        torch.Generator, so neither the global RNG nor the module generator g
+        is touched. Logs '[FeatShift] task t shift=.. n=..' and returns s_t.'''
+        shift_set = self.data_manager.get_dataset(class_range, source="train", mode="test")
+        gen = torch.Generator()
+        gen.manual_seed(0)
+        loader = DataLoader(shift_set, batch_size=256, shuffle=False,
+                            num_workers=4, worker_init_fn=seed_worker, generator=gen)
+        old_model = self._get_prev_feature_model()
+        self.model.eval()
+        num = den = 0.0
+        n = 0
+        for _, (_, _, x, _) in enumerate(loader):
+            x = x.cuda()
+            f_old = old_model.get_features(x).float()
+            f_new = self.model.get_features(x).float()
+            num += (f_new - f_old).norm(dim=1).sum().item()
+            den += f_old.norm(dim=1).sum().item()
+            n += x.size(0)
+        self._release_prev_feature_model(old_model)
+        s_t = num / den if den > 0.0 else 0.0
+        logging.info(f"[FeatShift] task {self._cur_task} shift={s_t:.6g} n={n}")
+        return s_t
+
+    def _log_merge_rule_state(self, method):
+        """One '[Merging] opcm ...' or '[Merging] nufilt ...' line per merge (E15a).
+
+        Reads the per-step statistics that merging_sota.opcm_pair / nufilt_pair
+        leave in self._merge_rule_state (lam_t, kept_frac, ...; filtered_frac,
+        n_adapted, ...). Called only for those two rules; the five older SOTA
+        rules write nothing there and log nothing here.
+        """
+        st = self._merge_rule_state
+
+        def fmt(v):
+            return f"{v}" if isinstance(v, (int, np.integer)) else f"{float(v):.4g}"
+
+        if method == "opcm":
+            fields = [f"alpha={self._config.get('merge_opcm_alpha', 0.5)}",
+                      f"lam_t={float(st.get('lam', float('nan'))):.4f}",
+                      f"lam_rule={self._config.get('merge_opcm_lam', 'adaptive')}"]
+            optional = ("lam_prev", "kept_frac", "r_alpha_mean", "norm_mean")
+        else:
+            fields = [f"rp={self._config.get('merge_nufilt_rp', 128)}",
+                      f"adapt={int(bool(self._config.get('merge_nufilt_adapt', False)))}"]
+            optional = ("filtered_frac", "rp_eff_mean", "n_adapted",
+                        "adapt_loss_first", "adapt_loss_last")
+        fields += [f"{k}={fmt(st[k])}" for k in optional if st.get(k) is not None]
+        logging.info(f"[Merging] {method} " + " ".join(fields))
+
     def _spectral_variant(self):
         return self._config.get(
             "spectral_variant", self._config.get("pspectral_variant", "only_A")
         )
 
-    def merge(self):
+    def merge(self, alpha_override=None):
+        '''Merge the task-t LoRA state into the deployed module (M_t).
+
+        alpha_override (rebuttal E7): realised damping alpha for THIS task in
+        place of config train_merge_alpha (pspectral branch only); the config
+        is never mutated, so merged_checkpoint(t-1) stays resolvable.
+        merge_log_stats (default False) adds one '[MergeStat]' line per task.
+        '''
         logging.info(f"[Merging] Task {self._cur_task}")
+        if alpha_override is not None and self._config["train_merge"] != "pspectral":
+            raise ValueError("alpha_override is supported by the pspectral merge only")
 
         reset_merge = self._config.get("reset_merge", False)
         if not reset_merge:
@@ -1538,18 +2472,26 @@ class Learner:
                 w_prev = torch.load(w_prev_ckpt)
                 w_new = torch.load(self.backbone_checkpoint(self._cur_task))
                 variant = self._spectral_variant()
+                # Realised alpha: the config value (same object, so the log line
+                # below is unchanged) unless an adaptive rule supplied one.
+                alpha = (self._config["train_merge_alpha"] if alpha_override is None
+                         else float(alpha_override))
+                update_op = self._config.get("merge_update_op", "trunc")
+                log_stats = self._config.get("merge_log_stats", False)
                 if method == "pspectral":
                     logging.info(
                         f"[Merging] pspectral {variant} "
                         f"(p={self._config['pspectral_p']}, "
-                        f"alpha={self._config['train_merge_alpha']}) of "
+                        f"alpha={alpha}) of "
                         f"{os.path.basename(w_prev_ckpt)} + task {self._cur_task}"
                     )
+                    t0 = self._merge_tic(log_stats)
                     backbone_params = pspectral_merging(
                         w_prev, w_new,
                         p=self._config["pspectral_p"],
-                        alpha=self._config["train_merge_alpha"],
+                        alpha=alpha,
                         variant=variant,
+                        update_op=update_op,
                     )
                 else:
                     logging.info(
@@ -1558,12 +2500,17 @@ class Learner:
                         f"alpha={self._config['train_merge_alpha']}) of "
                         f"{os.path.basename(w_prev_ckpt)} + task {self._cur_task}"
                     )
+                    t0 = self._merge_tic(log_stats)
                     backbone_params = kspectral_merging(
                         w_prev, w_new,
                         k=self._config["train_merge_k"],
                         alpha=self._config["train_merge_alpha"],
                         variant=variant,
                     )
+                if log_stats:
+                    self._log_merge_stat(
+                        w_prev, w_new, backbone_params, self._merge_toc(t0),
+                        alpha=alpha, op=update_op if method == "pspectral" else None)
                 self.load_backbone(backbone_params, load_norm=model_use_norm)
                 logging.info(f"[Merging] Saving merged checkpoint for task {self._cur_task}")
                 torch.save(
@@ -1588,6 +2535,8 @@ class Learner:
                 logging.info(
                     f"[Merging] SOTA {method} (lamb={self._config['train_merge_coef']}) "
                     f"of {os.path.basename(prev_ckpt)} + task {self._cur_task}")
+                log_stats = self._config.get("merge_log_stats", False)
+                t0 = self._merge_tic(log_stats)
                 backbone_params = sota_merge(
                     base_params, w_prev, w_new, method,
                     lamb=self._config["train_merge_coef"],
@@ -1596,7 +2545,24 @@ class Learner:
                     bc_beta=self._config.get("merge_bc_beta", 0.85),
                     bc_gamma=self._config.get("merge_bc_gamma", 0.01),
                     knots_topk=self._config.get("merge_knots_topk", 50.0),
+                    # Rebuttal E15a (OPCM / NUFILT; ignored by the five older
+                    # rules): their parameters, the cross-task state dict and
+                    # the step index t that opcm_pair's lam_t schedule needs.
+                    opcm_alpha=self._config.get("merge_opcm_alpha", 0.5),
+                    opcm_lam=self._config.get("merge_opcm_lam", "adaptive"),
+                    nufilt_rp=self._config.get("merge_nufilt_rp", 128),
+                    nufilt_rv=self._config.get("merge_nufilt_rv", 8),
+                    nufilt_rl=self._config.get("merge_nufilt_rl", 64),
+                    nufilt_adapt=self._config.get("merge_nufilt_adapt", False),
+                    nufilt_iters=self._config.get("merge_nufilt_iters", 50),
+                    nufilt_lr=self._config.get("merge_nufilt_lr", 1e-3),
+                    state=self._merge_rule_state,
+                    task=self._cur_task,
                 )
+                if log_stats:
+                    self._log_merge_stat(w_prev, w_new, backbone_params, self._merge_toc(t0))
+                if method in ("opcm", "nufilt"):
+                    self._log_merge_rule_state(method)
                 self.load_backbone(backbone_params, load_norm=model_use_norm)
                 logging.info(f"[Merging] Saving merged checkpoint for task {self._cur_task}")
                 torch.save(
@@ -1632,12 +2598,20 @@ class Learner:
                 ]
             logging.info(f"[Merging] Merging {len(task_params)} task checkpoints")
 
+            log_stats = self._config.get("merge_log_stats", False)
+            t0 = self._merge_tic(log_stats)
             backbone_params = merge(
                 base_params, task_params,
                 method=method,
                 lamb=self._config["train_merge_coef"],
                 topk=self._config["train_merge_topk"],
             )
+            if log_stats:
+                # Step from the previously deployed state (task-0 state at
+                # t = 1, else M_{t-1}) to the merged state; raw update = W_t.
+                merge_time = self._merge_toc(t0)
+                w_prev = torch.load(self._prev_deployed_checkpoint(), map_location="cpu")
+                self._log_merge_stat(w_prev, task_params[-1], backbone_params, merge_time)
 
             self.load_backbone(backbone_params, load_norm=model_use_norm)
 
@@ -1692,21 +2666,9 @@ class Learner:
         return os.path.join(self._ckpt_dir(), f"{self.prefix()}_classifier_{task}.pt")
 
     def merged_checkpoint(self, task):
-        method = self._config["train_merge"]
-        if method == "pspectral":
-            tag = (
-                f"pspec_{self._spectral_variant()}"
-                f"_p{self._config['pspectral_p']}_a{self._config['train_merge_alpha']}"
-            )
-        elif method == "kspectral":
-            tag = (
-                f"kspec_{self._spectral_variant()}"
-                f"_k{self._config['train_merge_k']}_a{self._config['train_merge_alpha']}"
-            )
-        else:
-            tag = f"{method}_c{self._config['train_merge_coef']}"
+        # Tag rule shared with the run_config_sweep cleanup block (merge_tag).
         return os.path.join(
-            self._ckpt_dir(), f"{self.prefix()}_merged_{tag}_{task}.pt"
+            self._ckpt_dir(), f"{self.prefix()}_merged_{merge_tag(self._config)}_{task}.pt"
         )
 
     def load_backbone(self, backbone_params, load_norm=True, target=None):
@@ -1847,6 +2809,36 @@ RECIPE_PRESETS = {
         "e2_sd_weight": 0.25,
         "e2_ca_epochs": 3,
     },
+    "inflora": {
+        # github.com/liangyanshuo/InfLoRA configs/cifar100_inflora.json and
+        # mimg10_inflora.json: Adam (0.9, 0.999) lr 5e-4 for LoRA-B and the
+        # current head (one optimizer, tied lr), weight decay 0, batch 128,
+        # 20 (CIFAR) / 50 (IN-R) epochs, per-epoch CosineSchedule
+        # lr*cos(99*pi*e/(200*(K-1))), rank 10 on K and V of all 12 blocks,
+        # DualGPM threshold eps -> 1.0 over the 10 sessions, plain biased
+        # per-task nn.Linear heads trained with local CE and concatenated at
+        # test, CLS after the final LayerNorm with no extra norm, no Stage 2.
+        "train_optimizer": "adam",
+        "train_base_lr": 5e-4,
+        "train_head_lr": None,           # -> base lr (train_backbone)
+        "train_weight_decay": 0.0,
+        "train_epochs": 20,
+        "train_batch_size": 128,
+        "train_scheduler": "inflora_cosine",
+        "model_use_norm": False,
+        "model_classifier_use_norm": False,
+        "model_classifier_bias": True,
+        "train_merge": "none",
+        "train_ca": False,               # native classifier (no LCA)
+        "train_drift": False,            # no drift map
+        "lora_r": 10,
+        "inflora_lamb": 0.95,            # eps (CIFAR default; IN-R 0.98)
+        "inflora_lame": 1.0,
+        "inflora_backbone": "vit_base_patch16_224_in21k",   # = augreg_in21k (published)
+        "inflora_gram_mode": "train",    # upstream: shuffled, augmented train loader
+        "inflora_dual": True,
+        "inflora_layers": None,          # all 12 blocks ([0..4] = InfLoRA-b5 layers)
+    },
     "full": {"train_base_lr": 3e-4},
     "full_nsp": {"train_base_lr": 5e-6, "train_optimizer": "adamw", "nsp_weight": 0.02,
                  "train_head_lr": 1e-3},
@@ -1902,6 +2894,13 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
     data_manager = DataManager(
         config["dataset_name"], shuffle_order, config["seed"],
         config["dataset_init_cls"], config["dataset_increment"], False,
+        # Rebuttal data hook (E13 few-shot per task, E14 validation carve); all
+        # four default to the no-op and a None seed means the run seed. The
+        # carve precedes the few-shot draw; test set and class order untouched.
+        val_frac=config.get("data_val_frac", 0.0),
+        val_seed=config.get("data_val_seed"),
+        fewshot_k=config.get("data_fewshot_k"),
+        subsample_seed=config.get("data_subsample_seed"),
     )
 
     if dataset_name == "imageneta" and config.get("train_iterations") is None:
@@ -1913,6 +2912,11 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
         logging.info("Configuration:")
         for key, value in config.items():
             logging.info(f"  {key}: {value}")
+        if any(k in config for k in DATA_HOOK_KEYS):
+            # Realised per-class train / val / test counts of the data hook;
+            # describe() carries the '[Data] ' prefix itself. Logged only when
+            # a data_* key is set, so default logs stay byte-identical.
+            logging.info(data_manager.describe())
 
         learner = Learner(config)
         learner.learn(data_manager)
@@ -1924,9 +2928,11 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
             out = os.path.join(
                 config["final_model_dir"],
                 f"{dataset_name}_{config_name}_s{seed}.pt")
-            if getattr(learner, "_is_e2", False):
+            if getattr(learner, "_is_e2", False) or getattr(learner, "_is_inflora", False):
                 # E2's older pairs are frozen (not in trainable params) and its
                 # structure grows per task -> pickle the whole module instead.
+                # InfLoRA folds its branches into the frozen qkv weights, which
+                # the 'main' payload (requires_grad params only) would drop.
                 payload = {
                     "kind": "main_pickle",
                     "config": {k: v for k, v in config.items()},
@@ -1944,7 +2950,20 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
                 }
             if hasattr(learner, "_class_means"):
                 payload["class_means"] = learner._class_means.cpu()
-                payload["class_covs"] = learner._class_covs.cpu()
+                if getattr(learner, "_class_covs", None) is not None:
+                    payload["class_covs"] = learner._class_covs.cpu()
+                else:
+                    # Rebuttal E5 cheap statistics (train_ca_cov_mode diag |
+                    # lowrank | shared): keys present in those modes only, so
+                    # the default payload is unchanged.
+                    cov_mode = config.get("train_ca_cov_mode", "class")
+                    if cov_mode in ("diag", "lowrank"):
+                        payload["class_vars"] = learner._class_vars.cpu()
+                    if cov_mode == "lowrank":
+                        payload["class_lr_U"] = learner._class_lr_U.cpu()
+                    if cov_mode == "shared":
+                        payload["class_cov_shared"] = shared_cov(
+                            learner._shared_scatter, learner._shared_n).cpu()
             torch.save(payload, out)
             logging.info(f"[Export] Final model saved to {out}")
 
@@ -1955,7 +2974,14 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
             # sized, so total acc == mean of grouped accs). Used as pruning
             # references for later searches.
             "traj": [float(np.mean(row)) for row in learner._mlp_matrix],
+            # Sample-weighted per-task total accuracy (InfLoRA's ACC_t, E15b);
+            # the exception path returns an empty list under the same key.
+            "total_curve": list(getattr(learner, "_total_acc_curve", [])),
         }
+        if hasattr(learner, "_faa_val"):
+            # Rebuttal E14: metrics on the validation carve (data_val_frac > 0).
+            result.update({"faa_val": learner._faa_val, "ffm_val": learner._ffm_val,
+                           "asa_val": learner._asa_val})
 
         del learner
         torch.cuda.empty_cache()
@@ -1966,6 +2992,7 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
         logging.error(f"[Experiment {experiment_name}] {type(e).__name__}: {e}")
         logging.error(traceback.format_exc())
         result = {k: 0.0 for k in ["faa", "ffm", "asa"]}
+        result["total_curve"] = []   # same key as the success path (run_inflora)
     return result
 
 
@@ -2006,6 +3033,12 @@ def run_config_sweep(datasets, experiment_configs, seeds, log_root=LOG_DIR):
                     dataset_results[config_name] = {k: [] for k in ["faa", "ffm", "asa"]}
                 for k in ("faa", "ffm", "asa"):
                     dataset_results[config_name][k].append(result[k])
+                # Rebuttal E14: validation-split metrics exist only for seeds
+                # that ran with data_val_frac > 0 and finished (a crashed seed
+                # returns none), so they are collected where present.
+                for k in ("faa_val", "ffm_val", "asa_val"):
+                    if k in result:
+                        dataset_results[config_name].setdefault(k, []).append(result[k])
 
             logging.info("\n" + "=" * 80)
             logging.info(f"SUMMARY  {dataset_name.upper()} — {config_name.upper()}")
@@ -2016,6 +3049,17 @@ def run_config_sweep(datasets, experiment_configs, seeds, log_root=LOG_DIR):
                 f"FAA: {np.mean(r['faa']):.2f} ± {np.std(r['faa']):.2f} | "
                 f"FFM: {np.mean(r['ffm']):.2f} ± {np.std(r['ffm']):.2f}"
             )
+            if r.get("faa_val"):
+                # Rebuttal E14: one extra line after the unchanged SUMMARY line;
+                # mean and std (ddof 0) over the seeds that returned val metrics,
+                # with the count appended when a seed is missing (crashed).
+                n_val = len(r["faa_val"])
+                logging.info(
+                    f"  [val] ASA: {np.mean(r['asa_val']):.2f} ± {np.std(r['asa_val']):.2f} | "
+                    f"FAA: {np.mean(r['faa_val']):.2f} ± {np.std(r['faa_val']):.2f} | "
+                    f"FFM: {np.mean(r['ffm_val']):.2f} ± {np.std(r['ffm_val']):.2f}"
+                    + (f" | n={n_val}/{len(seeds)}" if n_val != len(seeds) else "")
+                )
 
             method = config.get("train_method", "seqft")
             if config.get("cleanup_merged", False) and method in ("seqft",) + HYBRID_METHODS:
@@ -2023,16 +3067,15 @@ def run_config_sweep(datasets, experiment_configs, seeds, log_root=LOG_DIR):
                 # checkpoints of other configs -- never glob them all.
                 merged = BASE_CONFIG.copy()
                 merged.update(config)
-                mm = merged["train_merge"]
-                variant = merged.get("spectral_variant", merged.get("pspectral_variant", "only_A"))
-                if mm == "pspectral":
-                    tag = f"pspec_{variant}_p{merged['pspectral_p']}_a{merged['train_merge_alpha']}"
-                elif mm == "kspectral":
-                    tag = f"kspec_{variant}_k{merged['train_merge_k']}_a{merged['train_merge_alpha']}"
-                else:
-                    tag = f"{mm}_c{merged['train_merge_coef']}"
+                tag = merge_tag(merged)
                 ckpt_dir = config.get("checkpoint_dir", os.path.join(CHECKPOINT_ROOT, method))
-                stale = glob.glob(os.path.join(ckpt_dir, f"*_merged_{tag}_*.pt"))
+                # Only files whose suffix after the tag is a bare task index:
+                # a tag that is a prefix of another config's tag must not
+                # claim that config's files (legacy files always end in _<t>.pt,
+                # so the filter leaves the legacy behaviour unchanged).
+                task_file = re.compile(rf"_merged_{re.escape(tag)}_\d+\.pt$")
+                stale = [f for f in glob.glob(os.path.join(ckpt_dir, f"*_merged_{tag}_*.pt"))
+                         if task_file.search(os.path.basename(f))]
                 for f in stale:
                     os.remove(f)
                 logging.info(f"[Cleanup] Removed {len(stale)} merged checkpoints for {config_name}")
@@ -2058,11 +3101,19 @@ def run_recipe_comparison(datasets=None, recipes=None, seeds=(1993,),
                      log_root=log_root or LOG_DIR)
 
 
-def run_smoke_tests():
+def run_smoke_tests(include_inflora=False):
     """Tiny 2-task run of every recipe on imagenetr: catches shape/lifecycle
-    bugs, not accuracy. No caching, 1 epoch / 50 iterations."""
+    bugs, not accuracy. No caching, 1 epoch / 50 iterations.
+
+    The legacy recipe list is unchanged by default. `include_inflora` (CLI
+    `--smoke-inflora`) appends the InfLoRA port (E15b), which downloads its own
+    published backbone (vit_base_patch16_224_in21k) and writes its own
+    checkpoints_main/inflora states; it runs last, so the earlier cells keep
+    their RNG stream either way. run_inflora.py --smoke covers the same cell."""
     recipes = ["seqft", "basic_lora", "sgp_lora", "nsp_lora", "full",
                "full_nsp", "first_task_lora", "joint_lora"]
+    if include_inflora:
+        recipes.append("inflora")
     configs = {}
     for method in recipes:
         cfg = {
@@ -2083,7 +3134,7 @@ def run_smoke_tests():
 
 
 if __name__ == "__main__":
-    if "--smoke" in sys.argv:
-        run_smoke_tests()
+    if "--smoke" in sys.argv or "--smoke-inflora" in sys.argv:
+        run_smoke_tests(include_inflora="--smoke-inflora" in sys.argv)
     else:
         run_recipe_comparison()

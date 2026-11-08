@@ -5,12 +5,18 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from utils.data import iCIFAR224, iImageNetR, iImageNetA, CUB, omnibenchmark, vtab, cars, core50, cddb, domainnet, iTinyImageNet, iPlaces365, officehome_dil, dndil
 import random
+from utils import splits
 
 
 class DataManager(object):
-    def __init__(self, dataset_name, shuffle, seed, init_cls, increment,use_input_norm=False):
+    def __init__(self, dataset_name, shuffle, seed, init_cls, increment,use_input_norm=False,
+                 *, val_frac=0.0, val_seed=None, fewshot_k=None, subsample_seed=None):
         self.dataset_name = dataset_name
         self._setup_data(dataset_name, shuffle, seed,use_input_norm)
+        # Rebuttal data hook (E13 few-shot per task, E14 validation carve):
+        # applied once on the remapped labels, before the task increments.
+        # All four keyword-only arguments default to the no-op.
+        self._apply_splits(seed, val_frac, val_seed, fewshot_k, subsample_seed)
         assert init_cls <= len(self._class_order), "No enough classes."
         self._increments = [init_cls]
         while sum(self._increments) + increment < len(self._class_order):
@@ -41,6 +47,10 @@ class DataManager(object):
             x, y = self._train_data, self._train_targets
         elif source == "test":
             x, y = self._test_data, self._test_targets
+        elif source == "val":
+            if not self.has_val:
+                raise ValueError("val split is empty; build DataManager with val_frac > 0.")
+            x, y = self._val_data, self._val_targets
         else:
             raise ValueError("Unknown data source {}.".format(source))
 
@@ -122,6 +132,71 @@ class DataManager(object):
             print("Class Order: ["+",".join([str(x) for x in self._class_order])+"]")
             # for clz in self._class_order:
             #     print(f"Class {clz}: {self._train_targets.tolist().count(clz)} samples")
+
+    # ------------------------------------------------------------------
+    # Rebuttal data hook (plan E13/E14); the split rules live in utils/splits.py
+    # ------------------------------------------------------------------
+    def _apply_splits(self, seed, val_frac, val_seed, fewshot_k, subsample_seed):
+        """Carve the validation split, then few-shot subsample the remaining train set.
+
+        Runs once on the remapped labels, right after _setup_data. The test
+        set, the class order and the task increments are untouched. With
+        the default arguments nothing is drawn or copied: the train arrays
+        stay the same objects and the val arrays are empty slices of them,
+        so existing runs are byte-identical. A seed of None means the run
+        seed (the class-order seed), so a run is reproducible from its seed.
+        """
+        self._val_frac = float(val_frac) if val_frac else 0.0
+        self._val_seed = seed if val_seed is None else val_seed
+        self._fewshot_k = fewshot_k
+        self._subsample_seed = seed if subsample_seed is None else subsample_seed
+        (self._train_data, self._train_targets,
+         self._val_data, self._val_targets) = splits.apply_splits(
+            self._train_data, self._train_targets,
+            val_frac=self._val_frac, val_seed=self._val_seed,
+            fewshot_k=self._fewshot_k, subsample_seed=self._subsample_seed,
+        )
+        if self._val_frac > 0 or self._fewshot_k is not None:
+            self._train_set_size = len(self._train_data)
+
+    @property
+    def has_val(self):
+        """True when a validation split was carved (source="val" is available)."""
+        return len(self._val_targets) > 0
+
+    def train_class_counts(self):
+        """Realised per-class training counts after the hook (int64, length C)."""
+        return np.bincount(self._train_targets, minlength=len(self._class_order)).astype(np.int64)
+
+    def val_class_counts(self):
+        """Per-class validation counts (int64, length C; all zero without a carve)."""
+        return np.bincount(self._val_targets, minlength=len(self._class_order)).astype(np.int64)
+
+    def describe(self):
+        """The grep-able '[Data] ...' summary line of the realised splits.
+
+        One line; 'none' marks an inactive step. Default run:
+          [Data] dataset=cifar224 | train: n=50000 C=100 per-class min/median/max=500/500/500
+          | val: none | test: n=10000 C=100 per-class min/median/max=100/100/100 | fewshot: none
+        With the hook active the val token reads
+          val: n=5000 C=100 per-class min/median/max=50/50/50 (val_frac=0.1, val_seed=1993)
+        and the fewshot token
+          fewshot: k=5 (subsample_seed=1993)
+        """
+        n_cls = len(self._class_order)
+        parts = ["[Data] dataset=%s" % self.dataset_name,
+                 splits.describe(self._train_targets, "train", n_cls)]
+        if self._val_frac > 0:
+            parts.append(splits.describe(self._val_targets, "val", n_cls)
+                         + " (val_frac=%g, val_seed=%s)" % (self._val_frac, self._val_seed))
+        else:
+            parts.append("val: none")
+        parts.append(splits.describe(self._test_targets, "test", n_cls))
+        if self._fewshot_k is not None:
+            parts.append("fewshot: k=%d (subsample_seed=%s)" % (self._fewshot_k, self._subsample_seed))
+        else:
+            parts.append("fewshot: none")
+        return " | ".join(parts)
 
     def _select(self, x, y, low_range, high_range):
         idxes = np.where(np.logical_and(y >= low_range, y < high_range))[0]

@@ -2,8 +2,12 @@
 https://github.com/raoxuan98-hash/lr_rgda_hopdc (models/basic_lora.py,
 models/sgp_lora.py, models/full_finetune.py, models/distillator.py, lora.py).
 
-Self-contained (torch + timm only). All wrappers share one interface driven by
-main.Learner:
+InfLoRA (Liang & Li, CVPR 2024) is ported from github.com/liangyanshuo/InfLoRA
+(section "InfLoRA" below; its projection math is the NumPy module
+inflora_gpm.py).
+
+Self-contained (torch + timm, plus NumPy for the InfLoRA port). All wrappers
+share one interface driven by main.Learner:
     forward(x) -> features            (num_classes=0 ViT, pooled CLS)
     get_param_groups()                -> trainable params for the optimizer
     merge_lora_weights()              fold adapter into backbone, re-init adapter
@@ -18,10 +22,19 @@ import copy
 import logging
 from typing import Dict, Iterable, List, Optional
 
+import numpy as np
 import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from inflora_gpm import (
+    basis_leakage,
+    design_down_projection,
+    dualgpm_step,
+    pack_basis,
+    unpack_basis,
+)
 
 
 # LoRA / DoRA modules =========================================================
@@ -521,6 +534,32 @@ def peft_qkv_modules(peft_model) -> Dict[str, nn.Module]:
     return {f"block_{idx}_attn_qkv": blk.attn.qkv for idx, blk in enumerate(blocks)}
 
 
+def peft_adapted_modules(peft_model, targets=("qkv", "fc1", "fc2")) -> Dict[str, nn.Module]:
+    """Every adapted linear layer per block of a PEFT-wrapped timm ViT, keyed
+    block_<i>_attn_qkv / block_<i>_mlp_fc1 / block_<i>_mlp_fc2 (rebuttal E6).
+
+    Generalises peft_qkv_modules (left untouched: the hybrids stay qkv-only) to
+    the headline recipe's target modules ['qkv', 'fc1', 'fc2'] so that
+    compute_covariances(backbone, loader, modules=peft_adapted_modules(backbone))
+    gives the layer-INPUT covariances in the row space of each lora_A (768 for
+    qkv/fc1, 3072 for fc2). `targets` selects the module names; unknown names
+    raise ValueError. Blocks are visited in order, qkv before fc1 before fc2.
+    """
+    known = {"qkv": ("attn_qkv", lambda blk: blk.attn.qkv),
+             "fc1": ("mlp_fc1", lambda blk: blk.mlp.fc1),
+             "fc2": ("mlp_fc2", lambda blk: blk.mlp.fc2)}
+    unknown = [t for t in targets if t not in known]
+    if unknown:
+        raise ValueError(f"peft_adapted_modules: unknown target module(s) {unknown}; known {sorted(known)}")
+    blocks = peft_model.base_model.model.blocks
+    out = {}
+    for idx, blk in enumerate(blocks):
+        for t in targets:
+            suffix, getter = known[t]
+            out[f"block_{idx}_{suffix}"] = getter(blk)
+    return out
+
+
 def peft_lora_A_params(peft_model) -> Dict[str, nn.Parameter]:
     """lora_A weight per adapted qkv, keyed like peft_qkv_modules."""
     out = {}
@@ -947,10 +986,177 @@ class E2LoRAViT(BaseAdapterViT):
                 p.requires_grad = False
 
 
+# InfLoRA (Liang & Li, CVPR 2024) =============================================
+# Port of github.com/liangyanshuo/InfLoRA (MIT): models/vit_inflora.py
+# (Attention_LoRA) and methods/inflora.py (InfLoRA._train, update_DualGPM).
+# Upstream keeps one frozen LoRA branch per task on the K and V rows of every
+# qkv projection -- lora_A_k/v (768 -> r; the paper's B_t, FIXED, designed by
+# an SVD of the task's input Gram matrix) and lora_B_k/v (r -> 768; the paper's
+# A_t, TRAINED, zero-init) -- and sums all branches on every forward with no
+# alpha/r scaling, dropout or bias. Old branches never change, so folding
+# dW_t = B_t A_t into the K/V rows of qkv.weight after task t is exactly
+# equivalent to summing the frozen branches. The port therefore follows the
+# PlainLoRA merge-family path of main.py (fold via merge_lora_weights,
+# trainable_state caching, compute_covariances hooks on lora_modules) and
+# needs only two extra calls from main.Learner: design_lora_A before a task
+# trains and update_memory after it (both on Gram matrices from
+# compute_covariances). The projection math is transcribed in inflora_gpm.py
+# (NumPy on the CPU, as upstream); the per-block DualGPM basis lives in
+# fixed-size buffers so trainable_state / load_trainable_state round-trip it.
+
+
+class InfLoRAQKV(nn.Module):
+    """InfLoRA branch on one timm qkv Linear (upstream Attention_LoRA, folded).
+
+    Parameters: lora_A_k / lora_A_v (r x d, requires_grad False; designed by
+    InfLoRAViT.design_lora_A before every task) and lora_B_k / lora_B_v (d x r,
+    trained, zero-init). Buffers: lora_active, and this block's DualGPM memory
+    as a zero-padded d x d ``basis`` with ``basis_cols`` used columns and the
+    ``basis_retain`` flag (False: the protected subspace M of upstream's
+    'remove' type, True: its complement M_perp of the 'retain' type).
+    forward adds [0; B_k A_k; B_v A_v] to the weight -- rows 0:d are q, d:2d
+    k, 2d:3d v in timm's (B, N, 3, heads, hd) reshape of the qkv output -- i.e.
+    upstream's ``k += x (B_k A_k)^T`` and ``v += x (B_v A_v)^T``.
+    """
+
+    def __init__(self, linear: nn.Linear, r: int):
+        super().__init__()
+        assert linear.out_features == 3 * linear.in_features, "InfLoRAQKV expects a fused qkv Linear"
+        self.linear = linear
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.r = r
+        d = self.in_features
+        w = linear.weight
+        # Paper's B_t (code lora_A_k/v): fixed, overwritten by the SVD design.
+        self.lora_A_k = nn.Parameter(torch.zeros(r, d, device=w.device, dtype=w.dtype), requires_grad=False)
+        self.lora_A_v = nn.Parameter(torch.zeros(r, d, device=w.device, dtype=w.dtype), requires_grad=False)
+        # Paper's A_t (code lora_B_k/v): trained, zero-init (branch starts at 0).
+        self.lora_B_k = nn.Parameter(torch.zeros(d, r, device=w.device, dtype=w.dtype))
+        self.lora_B_v = nn.Parameter(torch.zeros(d, r, device=w.device, dtype=w.dtype))
+        self.register_buffer("lora_active", torch.tensor(True))
+        # DualGPM memory (upstream feature_list[i] / project_type[i]) in fixed
+        # shapes: float32 like upstream's feature_list; cols 0 = empty.
+        self.register_buffer("basis", torch.zeros(d, d, dtype=torch.float32))
+        self.register_buffer("basis_cols", torch.tensor(0, dtype=torch.int64))
+        self.register_buffer("basis_retain", torch.tensor(False))
+
+    def _delta(self) -> torch.Tensor:
+        """[0; B_k A_k; B_v A_v] (3d x d): the branch on the K and V rows."""
+        dk = self.lora_B_k @ self.lora_A_k
+        dv = self.lora_B_v @ self.lora_A_v
+        return torch.cat([dk.new_zeros(self.in_features, self.in_features), dk, dv], dim=0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.lora_active:
+            return F.linear(x, self.linear.weight + self._delta(), self.linear.bias)
+        return self.linear(x)
+
+    @torch.no_grad()
+    def merge_lora_weights(self, lora_active: bool = True) -> None:
+        """Fold the trained branch into qkv.weight and zero B. Unlike
+        OriginalLoRA, A is NOT re-initialised: the next task designs it."""
+        self.linear.weight.data.add_(self._delta().to(self.linear.weight.dtype))
+        self.lora_B_k.data.zero_()
+        self.lora_B_v.data.zero_()
+        self.lora_active.fill_(lora_active)
+
+    # ---- DualGPM memory / down-projection access (NumPy side) ----
+    def get_basis(self):
+        """(M as a float64 (d, cols) array, or None when empty; retain flag)."""
+        cols = int(self.basis_cols.item())
+        M = unpack_basis(self.basis.detach().cpu().numpy(), cols)
+        return M, bool(self.basis_retain.item())
+
+    @torch.no_grad()
+    def set_basis(self, M, retain: bool) -> None:
+        """Store M (d x cols, orthonormal columns) zero-padded; None = empty."""
+        self.basis.copy_(torch.from_numpy(pack_basis(M, self.in_features, dtype=np.float32)))
+        cols = 0 if M is None else int(np.asarray(M).shape[1])
+        self.basis_cols.fill_(cols)
+        self.basis_retain.fill_(bool(retain))
+
+    @torch.no_grad()
+    def set_lora_A(self, A) -> None:
+        """Copy the designed (r x d) matrix into BOTH lora_A_k and lora_A_v
+        (upstream assigns the same U[:, :r]^T / sqrt(3) to K and V)."""
+        t = torch.from_numpy(np.ascontiguousarray(A, dtype=np.float32))
+        self.lora_A_k.data.copy_(t)
+        self.lora_A_v.data.copy_(t)
+
+
+class InfLoRAViT(BaseAdapterViT):
+    """InfLoRA: designed-A / trained-B branches on the K,V rows of qkv in the
+    chosen blocks (default all 12; [0..4] with inflora_dual False and its own
+    lr / eps is upstream's InfLoRA-b5) and a DualGPM input-subspace memory per
+    block (upstream models/vit_inflora.py + methods/inflora.py). The wrappers
+    are registered in lora_modules as block_{i}_attn_qkv so compute_covariances
+    (the Gram passes), merge_lora_weights (the fold), finalize_without_lora
+    (snapshots) and trainable_state (caching, basis buffers included) work
+    unchanged. use_projection stays False: main.update_projections (an EMA of
+    covariances) is the wrong statistic for DualGPM and never runs. Trainable
+    parameters per task: 2 x 768 x r per block = 184,320 at r = 10 on 12
+    blocks (+ head: upstream's logged 192,010 on CIFAR, 199,700 on IN-R)."""
+
+    def __init__(self, vit_model, r: int = 10, lora_layer: Optional[Iterable[int]] = None):
+        super().__init__(vit_model)
+        assert r > 0
+        self.r = r
+        layers = list(lora_layer) if lora_layer is not None else list(range(len(vit_model.blocks)))
+
+        for p in vit_model.parameters():
+            p.requires_grad_(False)
+        for idx, blk in enumerate(vit_model.blocks):
+            if idx not in layers:
+                continue
+            blk.attn.qkv = InfLoRAQKV(blk.attn.qkv, r)
+            self.lora_modules[f"block_{idx}_attn_qkv"] = blk.attn.qkv
+
+    def get_param_groups(self):
+        # Upstream _train freezes everything but lora_B_k[t], lora_B_v[t] (and
+        # the current head, which main.train_backbone adds separately).
+        params = []
+        for mod in self.lora_modules.values():
+            params.extend([mod.lora_B_k, mod.lora_B_v])
+        return params
+
+    @torch.no_grad()
+    def design_lora_A(self, grams: Dict[str, np.ndarray]):
+        """Upstream InfLoRA._train, 'fix the down-projection': per block,
+        A_t = top-r left singular vectors of the current task's Gram after the
+        one-sided removal ('remove') or retention ('retain') of the stored
+        subspace, transposed and divided by sqrt(3); the raw Gram at task 0.
+        `grams` = {lora_modules name: (d, d) Gram}. Returns one row per block
+        (name, basis_cols, 'remove' | 'retain', leakage) with leakage =
+        inflora_gpm.basis_leakage (max |A M|; ~0 when the design is right)."""
+        rows = []
+        for name, mod in self.lora_modules.items():
+            M, retain = mod.get_basis()
+            A = design_down_projection(grams[name], M, retain, mod.r)
+            mod.set_lora_A(A)
+            cols = 0 if M is None else int(M.shape[1])
+            rows.append((name, cols, "retain" if retain else "remove", basis_leakage(A, M, retain)))
+        return rows
+
+    @torch.no_grad()
+    def update_memory(self, grams: Dict[str, np.ndarray], threshold: float, dual: bool = True):
+        """Upstream update_DualGPM (update_GPM when `dual` is False) on the
+        post-task Grams: grow / shrink / switch every block's basis at
+        `threshold`. Returns (name, basis_cols, 'remove' | 'retain', changed)
+        per block; `changed` = columns stored / appended / removed."""
+        rows = []
+        for name, mod in self.lora_modules.items():
+            M, retain = mod.get_basis()
+            M2, retain2, changed = dualgpm_step(grams[name], M, retain, threshold, dual)
+            mod.set_basis(M2, retain2)
+            rows.append((name, int(M2.shape[1]), "retain" if retain2 else "remove", int(changed)))
+        return rows
+
+
 # Factory =====================================================================
 MERGE_FAMILY = (
     "basic_lora", "sgp_lora", "nsp_lora", "full", "full_nsp",
-    "joint_lora", "joint_full", "first_task_lora", "e2lora",
+    "joint_lora", "joint_full", "first_task_lora", "e2lora", "inflora",
 )
 
 
@@ -966,6 +1172,20 @@ def build_recipe_backbone(config):
             config.get("e2lora_backbone", "vit_base_patch16_224_in21k"),
             pretrained=True, num_classes=0)
         return E2LoRAViT(vit, budget=config.get("e2lora_budget", None))
+    if method == "inflora":
+        # InfLoRA's published backbone (sinet_inflora.py with timm 0.6.7):
+        # 'vit_base_patch16_224_in21k' = AugReg ViT-B/16 pre-trained on
+        # ImageNet-21k only; in timm 1.0.x that name is a deprecation alias
+        # of 'vit_base_patch16_224.augreg_in21k' (the tag e2lora loads too).
+        # inflora_backbone 'vit_base_patch16_224' gives our matched backbone
+        # (augreg2_in21k_ft_in1k). inflora_layers: blocks with a branch
+        # (None = all 12); lora_r: the branch rank (upstream 10).
+        name = config.get("inflora_backbone", "vit_base_patch16_224_in21k")
+        vit = timm.create_model(name, pretrained=True, num_classes=0)
+        pcfg = getattr(vit, "pretrained_cfg", None) or {}
+        logging.info(f"[InfLoRA] backbone {name} -> {pcfg.get('architecture')}.{pcfg.get('tag')}")
+        return InfLoRAViT(vit, r=config.get("lora_r", 10),
+                          lora_layer=config.get("inflora_layers", None))
     vit = timm.create_model("vit_base_patch16_224", pretrained=True, num_classes=0)
     if config.get("replace_final_norm", False):
         # Reference featurization (inc_net.py:36); default off to match ours.
