@@ -79,6 +79,10 @@ def test_compare(ref):
 
 def test_cli_dry_runs():
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    # On a machine that already has logs / checkpoints the directories exist
+    # before the dry runs; only a directory that APPEARS during them is a failure.
+    out_dirs = ("logs_main", "checkpoints_main", "final_models")
+    pre = {d: os.path.exists(os.path.join(ROOT, d)) for d in out_dirs}
     r = subprocess.run([sys.executable, "regression_gate.py", "--dry-run"], cwd=ROOT,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     check(r.returncode == 0 and "[gate] cell gate_imagenetr_s1993" in r.stdout and "Traceback" not in r.stdout + r.stderr,
@@ -94,8 +98,8 @@ def test_cli_dry_runs():
                        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     first = [ln for ln in r.stdout.splitlines() if ln.startswith("[queue]  0 ")]
     check(bool(first) and "e7-calibrate" in first[0], "--from e7 starts the cached stream at e7-calibrate")
-    for d in ("logs_main", "checkpoints_main", "final_models"):
-        check(not os.path.exists(os.path.join(ROOT, d)), f"dry-runs created no {d}/")
+    for d in out_dirs:
+        check(pre[d] or not os.path.exists(os.path.join(ROOT, d)), f"dry-runs created no {d}/")
 
 
 def main():
