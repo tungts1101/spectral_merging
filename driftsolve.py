@@ -17,6 +17,11 @@ its log line.
 """
 import torch
 
+# The covariance-transport kernels live in covstats (one owner); they are
+# re-exported here because bench_drift_solve.py (E3) and the tier-b test reach
+# the whole drift-solve toolkit through this module. covstats imports only torch.
+from covstats import transport_diag, transport_full  # noqa: F401
+
 #: Default log grid of the GCV selection (train_drift_lambda_rule='gcv').
 GCV_GRID = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0)
 
