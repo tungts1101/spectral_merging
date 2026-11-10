@@ -42,7 +42,8 @@ FILE_RE = re.compile(
 # (helper.get_backbone), the merge-family dirs use the recipe name instead.
 _BB_RE = re.compile(r"^(?P<bb>.+?_lora)(?:_(?P<prefix>.+))?$")
 _RECIPES = ("e2lora", "basic_lora", "sgp_lora", "nsp_lora", "full_nsp", "full",
-            "sgp_seqft", "nsp_seqft", "first_task_lora", "joint_lora", "joint_full", "inflora")
+            "sgp_seqft", "nsp_seqft", "first_task_lora", "joint_lora", "joint_full", "inflora",
+            "keeplora")
 
 
 def parse_filename(name):

@@ -19,6 +19,7 @@ composable with every recipe.
 Usage:
     python main.py --smoke              # tiny 2-task run of every recipe
     python main.py --smoke-inflora      # the same plus the InfLoRA port (E15b)
+    python main.py --smoke-keeplora     # the same plus the KeepLoRA port (E15b)
     python main.py                      # controlled comparison sweep (default)
 """
 
@@ -78,6 +79,7 @@ from backbones import (
     build_recipe_backbone,
     build_projection,
     compute_covariances,
+    compute_keeplora_grams,
     peft_qkv_modules,
     peft_lora_A_params,
     Distiller,
@@ -354,6 +356,9 @@ class Learner:
         # InfLoRA (rebuttal E15b): merge-family path (fold, state cache) plus
         # the two Gram hooks _inflora_before_train / _inflora_after_train.
         self._is_inflora = self._method == "inflora"
+        # KeepLoRA (rebuttal E15b): merge-family path plus the gradient-design
+        # hook _keeplora_before_train and the basis hook _keeplora_after_train.
+        self._is_keeplora = self._method == "keeplora"
         self._known_classes = 0
         self._total_classes = 0
         self._class_increments = []
@@ -544,9 +549,10 @@ class Learner:
         #    teacher both need it after this task's training mutates it.
         #    (e2lora snapshots in before_task, while merged-A is still deployed.)
         if (not self._is_seqft and not self._is_e2 and not self._is_inflora
-                and self._cur_task > 0):
-            # InfLoRA has no drift map and no teacher: skip the deep copy of the
-            # model (incl. the 12 x 768^2 DualGPM bases) that nothing consumes.
+                and not self._is_keeplora and self._cur_task > 0):
+            # InfLoRA / KeepLoRA have no drift map and no teacher: skip the deep
+            # copy of the model (incl. the 768^2 subspace buffers) that nothing
+            # consumes.
             self._snapshot_prev()
 
         # 2. KD teacher = previous-task feature extractor.
@@ -631,6 +637,10 @@ class Learner:
                     # update BEFORE the state save, so the cached state (and
                     # the cache-hit path) carries the updated basis.
                     self._inflora_after_train(train_loader)
+                if self._is_keeplora:
+                    # KeepLoRA hook 2: post-merge feature pass + basis
+                    # extension, likewise before the state save.
+                    self._keeplora_after_train()
                 if self._cache_enabled():
                     dtype = {"fp16": torch.float16, "fp32": None}[self._config.get("cache_dtype", "fp32")]
                     torch.save(trainable_state(self.model.backbone, dtype=dtype),
@@ -866,6 +876,142 @@ class Learner:
             f"cols {[r[1] for r in rows]} | types {[r[2] for r in rows]} | "
             f"changed {[r[3] for r in rows]}")
 
+
+    # ------------------------------------------------------------------
+    # KeepLoRA hooks (rebuttal E15b; train_method "keeplora" only)
+    # ------------------------------------------------------------------
+    # Upstream MTIL/trainer/trainer.py (Trainer.train_one_task) and
+    # trainer/framework4MTIL.py: before a task trains, one pass over the task's
+    # shuffled, augmented loader (drop_last) with the adapters OFF averages the
+    # gradient of the frozen attention weights, which initialises A (frozen)
+    # and B (trained) of every module; after the task, with the adapter merged,
+    # a no-grad pass over the same loader accumulates the module inputs and
+    # extends the protected basis. Task 0 first seeds the basis from the
+    # pre-trained weights. Upstream's CLIP text head gives the gradient pass a
+    # meaningful classifier from the start; our per-task linear head is fresh,
+    # so keeplora_head_init 'ncm' (default) sets it to the nearest-class-mean
+    # rule (weight = class mean of the current features, bias = -|mean|^2 / 2)
+    # before the pass, as upstream's classifier variant (init_head_class_mean)
+    # does; 'default' keeps the random init. Neither pass touches the training
+    # loader's RNG stream beyond what the extra DataLoader draws from main.g.
+
+    def _keeplora_loader(self):
+        """Upstream accum_loader: the task's train images (train transform by
+        default; keeplora_feat_transform 'test' = deterministic transform),
+        shuffled, drop_last=True (equal batch sizes for the element-wise
+        feature mean), batch = train_batch_size."""
+        class_range = np.arange(self._known_classes, self._total_classes)
+        mode = self._config.get("keeplora_feat_transform", "train")
+        if mode not in ("train", "test"):
+            raise ValueError(f"keeplora_feat_transform must be 'train' or 'test', got {mode!r}")
+        ds = self.data_manager.get_dataset(class_range, source="train", mode=mode)
+        return DataLoader(ds, batch_size=self._config["train_batch_size"], shuffle=True,
+                          drop_last=True, num_workers=4, worker_init_fn=seed_worker, generator=g)
+
+    @torch.no_grad()
+    def _keeplora_init_head(self, loader):
+        """Nearest-class-mean init of the current head: weight = class mean of
+        the current (merged, adapters off) features, bias = -|mean|^2 / 2.
+        Returns the number of classes the drop_last pass did not see."""
+        head = self.model.classifier.heads[-1]
+        fc = [m for m in head.modules() if isinstance(m, nn.Linear)][-1]
+        n_new = self._total_classes - self._known_classes
+        sums = torch.zeros(n_new, fc.in_features, device="cuda")
+        counts = torch.zeros(n_new, device="cuda")
+        self.model.eval()
+        self.model.backbone.set_active(False)
+        for _, _, x, y in loader:
+            z = self.model.get_features(x.cuda()).float()
+            y = (y - self._known_classes).cuda()
+            sums.index_add_(0, y, z)
+            counts.index_add_(0, y, torch.ones_like(y, dtype=torch.float))
+        self.model.backbone.set_active(True)
+        means = sums / counts.clamp_min(1.0).unsqueeze(1)
+        fc.weight.data.copy_(means.to(fc.weight.dtype))
+        if fc.bias is not None:
+            fc.bias.data.copy_((-0.5 * means.pow(2).sum(1)).to(fc.bias.dtype))
+        return int((counts == 0).sum().item())
+
+    def _keeplora_gradients(self, loader):
+        """Upstream Trainer.estimate_gradient: the mean over the loader's
+        batches of the local-CE gradient w.r.t. the frozen attention weights,
+        adapters off (model.train() as upstream; the ViT has no dropout).
+        Returns ({lora_modules name: (out, in) float32 grad}, n_batches)."""
+        bb = self.model.backbone
+        weights = bb.base_weights()
+        bb.set_active(False)
+        for w in weights.values():
+            w.requires_grad_(True)
+        self.model.train()
+        sums = {name: torch.zeros_like(w, dtype=torch.float32) for name, w in weights.items()}
+        n = 0
+        for _, _, x, y in loader:
+            self.model.zero_grad(set_to_none=True)
+            z = self.model.get_features(x.cuda())
+            logits = self.model.classifier.heads[-1](z)
+            loss = F.cross_entropy(logits, (y - self._known_classes).cuda())
+            loss.backward()
+            for name, w in weights.items():
+                sums[name] += w.grad.detach().float()
+            n += 1
+        self.model.zero_grad(set_to_none=True)
+        for w in weights.values():
+            w.requires_grad_(False)
+            w.grad = None
+        bb.set_active(True)
+        if n == 0:
+            raise RuntimeError("[KeepLoRA] the gradient pass saw no batch "
+                               "(drop_last=True with fewer samples than train_batch_size)")
+        return {name: v / n for name, v in sums.items()}, n
+
+    def _keeplora_before_train(self):
+        """Hook 1 (train_backbone, after the cache check): basis seed at task
+        0, head init, task gradient, A / B design. Logs one '[KeepLoRA] Task t:
+        A/B designed ...' line that parse_logs reads."""
+        cfg = self._config
+        bb = self.model.backbone
+        eps_w = cfg.get("keeplora_eps_w", 0.85)
+        side = cfg.get("keeplora_wp_side", "output")
+        if self._cur_task == 0:
+            rows = bb.init_weight_subspace(eps_w, side)
+            cols = [r[2] for r in rows]
+            logging.info(f"[KeepLoRA] Task 0: weight subspace eps_w={eps_w} side={side} | "
+                         f"cols min {min(cols)} max {max(cols)} over {len(rows)} slices")
+        loader = self._keeplora_loader()
+        head_init = cfg.get("keeplora_head_init", "ncm")
+        if head_init == "ncm":
+            unseen = self._keeplora_init_head(loader)
+            logging.info(f"[KeepLoRA] Task {self._cur_task}: head {self._cur_task} set to class means"
+                         + (f" ({unseen} classes unseen by the drop_last pass)" if unseen else ""))
+        elif head_init != "default":
+            raise ValueError(f"keeplora_head_init must be 'ncm' or 'default', got {head_init!r}")
+        grads, n = self._keeplora_gradients(loader)
+        b_init = cfg.get("keeplora_b_init", "svd")
+        rows = bb.init_from_gradients(grads, b_init)
+        cols = [r[2] for r in rows]
+        leak = max(r[3] for r in rows)
+        logging.info(f"[KeepLoRA] Task {self._cur_task}: A/B designed for {len(rows)} slices from {n} batches "
+                     f"| basis cols min {min(cols)} max {max(cols)} | max|U^T A| {leak:.3e} | B init {b_init}")
+
+    def _keeplora_after_train(self):
+        """Hook 2 (train, after the fold and before the state save): feature
+        pass through the merged backbone and basis extension at eps_f. Logs
+        '[KeepLoRA] subspace task t ... | cols [...] | added [...]'."""
+        cfg = self._config
+        eps_f = cfg.get("keeplora_eps_f", 0.99)
+        mode = cfg.get("keeplora_feat_mode", "code")
+        grams, info = compute_keeplora_grams(self.model.backbone, self._keeplora_loader(), mode=mode)
+        rows = self.model.backbone.update_feature_subspace(grams, eps_f)
+        cols = [r[2] for r in rows]
+        added = [r[3] for r in rows]
+        d = self.model.backbone.feature_dim
+        skipped = sum(v[1] for v in info.values())
+        logging.info(f"[KeepLoRA] subspace task {self._cur_task} eps_f={eps_f} mode={mode} | "
+                     f"cols min {min(cols)} max {max(cols)} mean {np.mean(cols):.1f} | "
+                     f"added min {min(added)} max {max(added)} | full {sum(c >= d for c in cols)}/{len(cols)}"
+                     + (f" | skipped batches {skipped}" if skipped else "")
+                     + f" | cols {cols} | added {added}")
+
     # ------------------------------------------------------------------
     # Training (unified loop; seqft epoch-mode == exp19.train_mlp)
     # ------------------------------------------------------------------
@@ -928,6 +1074,11 @@ class Learner:
             # current task's input Grams. A cache hit returned above, so the
             # Gram pass runs only when the task really trains.
             self._inflora_before_train(train_loader)
+        if self._is_keeplora:
+            # KeepLoRA hook 1: seed the basis (task 0), set the new head to the
+            # class means, average the task gradient of the frozen attention
+            # weights and design A / B from it. Only when the task really trains.
+            self._keeplora_before_train()
 
         # first_task_lora: backbone adapted on task 0 only; later tasks train
         # the new head only (backbone frozen).
@@ -1175,8 +1326,19 @@ class Learner:
         if iterations is None:
             # Epoch mode (exp19): per-epoch cosine schedule; "constant" keeps
             # the lr fixed (E2-LoRA's IN-R config: milestones never fire).
+            per_step = False   # True: scheduler.step() after every batch (OneCycleLR)
             if sched_name == "constant":
                 scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda e: 1.0)
+            elif sched_name == "onecycle":
+                # KeepLoRA's released optimiser (MTIL trainer.build_optimizer):
+                # torch OneCycleLR with max_lr = the group lr, epochs x
+                # steps_per_epoch total steps, default warm-up (pct_start 0.3,
+                # cos anneal, div_factor 25, final_div_factor 1e4), stepped per
+                # batch; the head group gets the same schedule at its own lr.
+                scheduler = optim.lr_scheduler.OneCycleLR(
+                    optimizer, max_lr=[grp["lr"] for grp in optimizer.param_groups],
+                    epochs=epochs, steps_per_epoch=len(train_loader))
+                per_step = True
             elif sched_name == "multistep":
                 scheduler = optim.lr_scheduler.MultiStepLR(
                     optimizer,
@@ -1201,12 +1363,15 @@ class Learner:
                     total_loss += l
                     total_acc += a
                     total += b
-                scheduler.step()
+                    if per_step:
+                        scheduler.step()
+                if not per_step:
+                    scheduler.step()
                 logging.info(
                     f"[Training] Epoch {epoch + 1}/{epochs}, "
                     f"Loss: {total_loss / total:.4f}, Acc: {total_acc / total:.4f}"
-                    # InfLoRA only: the realised per-epoch lr (quarter-cosine check)
-                    + (f", lr: {epoch_lr:.3e}" if self._is_inflora else "")
+                    # InfLoRA / KeepLoRA only: the realised lr at the start of the epoch
+                    + (f", lr: {epoch_lr:.3e}" if (self._is_inflora or self._is_keeplora) else "")
                 )
         else:
             # Step mode (reference repo): per-step warmup-cosine schedule.
@@ -2839,6 +3004,43 @@ RECIPE_PRESETS = {
         "inflora_dual": True,
         "inflora_layers": None,          # all 12 blocks ([0..4] = InfLoRA-b5 layers)
     },
+    "keeplora": {
+        # github.com/MaolinLuo/KeepLoRA (branch v1) MTIL/configs/keeplora_order1.yaml
+        # and trainer/trainer.py: AdamW lr 1e-3, weight decay 0.01, batch 64,
+        # 10 epochs per task, OneCycleLR stepped per batch, rank 16 (lora_alpha
+        # 1, scaling 1/r) on q, k, v and the out-projection of all 12 blocks,
+        # eps_w 0.85 (vision side), eps_f 0.99; the trained parameters are B
+        # and the current head (one optimizer, tied lr); plain biased per-task
+        # nn.Linear heads with local CE, concatenated at test; CLS after the
+        # final LayerNorm with no extra norm; no Stage 2. Backbone: our matched
+        # ViT-B/16 (KeepLoRA has no class-incremental ViT numbers to match);
+        # keeplora_backbone 'vit_base_patch16_224_in21k' = the IN21k-only weights.
+        "train_optimizer": "adamw",
+        "train_base_lr": 1e-3,
+        "train_head_lr": None,           # -> base lr (train_backbone)
+        "train_weight_decay": 0.01,
+        "train_epochs": 10,
+        "train_batch_size": 64,
+        "train_scheduler": "onecycle",
+        "model_use_norm": False,
+        "model_classifier_use_norm": False,
+        "model_classifier_bias": True,
+        "train_merge": "none",
+        "train_ca": False,               # native classifier (no LCA)
+        "train_drift": False,            # no drift map
+        "lora_r": 16,
+        "keeplora_alpha": 1.0,
+        "keeplora_eps_w": 0.85,          # v_prin_subspace_threshold2
+        "keeplora_eps_f": 0.99,          # v_prin_subspace_threshold
+        "keeplora_wp_side": "output",    # released code; 'input' = the paper's Eq. 2
+        "keeplora_feat_mode": "code",    # released batch-mean statistic; 'gram' = all tokens
+        "keeplora_feat_transform": "train",   # upstream accum_loader: train transform
+        "keeplora_b_init": "svd",        # branch v1 (paper Eq. 6); 'zero' = KeepLoRA++ branch
+        "keeplora_head_init": "ncm",     # class-mean head before the gradient pass; 'default'
+        "keeplora_backbone": "vit_base_patch16_224",
+        "keeplora_layers": None,         # all 12 blocks
+        "keeplora_proj": True,           # also adapt attn.proj ('o')
+    },
     "full": {"train_base_lr": 3e-4},
     "full_nsp": {"train_base_lr": 5e-6, "train_optimizer": "adamw", "nsp_weight": 0.02,
                  "train_head_lr": 1e-3},
@@ -2928,11 +3130,13 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
             out = os.path.join(
                 config["final_model_dir"],
                 f"{dataset_name}_{config_name}_s{seed}.pt")
-            if getattr(learner, "_is_e2", False) or getattr(learner, "_is_inflora", False):
+            if getattr(learner, "_is_e2", False) or getattr(learner, "_is_inflora", False) \
+                    or getattr(learner, "_is_keeplora", False):
                 # E2's older pairs are frozen (not in trainable params) and its
                 # structure grows per task -> pickle the whole module instead.
-                # InfLoRA folds its branches into the frozen qkv weights, which
-                # the 'main' payload (requires_grad params only) would drop.
+                # InfLoRA / KeepLoRA fold their adapters into the frozen
+                # attention weights, which the 'main' payload (requires_grad
+                # params only) would drop.
                 payload = {
                     "kind": "main_pickle",
                     "config": {k: v for k, v in config.items()},
@@ -3101,7 +3305,7 @@ def run_recipe_comparison(datasets=None, recipes=None, seeds=(1993,),
                      log_root=log_root or LOG_DIR)
 
 
-def run_smoke_tests(include_inflora=False):
+def run_smoke_tests(include_inflora=False, include_keeplora=False):
     """Tiny 2-task run of every recipe on imagenetr: catches shape/lifecycle
     bugs, not accuracy. No caching, 1 epoch / 50 iterations.
 
@@ -3109,11 +3313,15 @@ def run_smoke_tests(include_inflora=False):
     `--smoke-inflora`) appends the InfLoRA port (E15b), which downloads its own
     published backbone (vit_base_patch16_224_in21k) and writes its own
     checkpoints_main/inflora states; it runs last, so the earlier cells keep
-    their RNG stream either way. run_inflora.py --smoke covers the same cell."""
+    their RNG stream either way. run_inflora.py --smoke covers the same cell.
+    `include_keeplora` (CLI `--smoke-keeplora`) appends the KeepLoRA port
+    (E15b) the same way (run_keeplora.py --smoke covers it too)."""
     recipes = ["seqft", "basic_lora", "sgp_lora", "nsp_lora", "full",
                "full_nsp", "first_task_lora", "joint_lora"]
     if include_inflora:
         recipes.append("inflora")
+    if include_keeplora:
+        recipes.append("keeplora")
     configs = {}
     for method in recipes:
         cfg = {
@@ -3134,7 +3342,8 @@ def run_smoke_tests(include_inflora=False):
 
 
 if __name__ == "__main__":
-    if "--smoke" in sys.argv or "--smoke-inflora" in sys.argv:
-        run_smoke_tests(include_inflora="--smoke-inflora" in sys.argv)
+    if "--smoke" in sys.argv or "--smoke-inflora" in sys.argv or "--smoke-keeplora" in sys.argv:
+        run_smoke_tests(include_inflora="--smoke-inflora" in sys.argv,
+                        include_keeplora="--smoke-keeplora" in sys.argv)
     else:
         run_recipe_comparison()

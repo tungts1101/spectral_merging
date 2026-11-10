@@ -669,6 +669,139 @@ def _pm(values):
     return f"{np.mean(values):.2f} {PM} {np.std(values):.2f}"        # run_inflora._pm (std ddof 0)
 
 
+def keeplora_config(ds, seed, init, inc, n_tasks, **over):
+    """Configuration dump of a run_keeplora.py cell (RECIPE_PRESETS['keeplora'] + run_keeplora.RECIPE)."""
+    cfg = OrderedDict([
+        ("seed", seed), ("train_method", "keeplora"), ("reset_train", False), ("reset_merge", True),
+        ("train_stop_at_task", -1), ("model_backbone", "vit_base_patch16_224"), ("train_optimizer", "adamw"),
+        ("train_base_lr", 0.001), ("train_head_lr", None), ("train_weight_decay", 0.01), ("train_epochs", 10),
+        ("train_batch_size", 64), ("train_scheduler", "onecycle"), ("model_use_norm", False),
+        ("model_classifier_use_norm", False), ("model_classifier_bias", True), ("train_merge", "none"),
+        ("train_ca", False), ("train_drift", False), ("lora_r", 16), ("keeplora_alpha", 1.0),
+        ("keeplora_eps_w", 0.85), ("keeplora_eps_f", 0.99), ("keeplora_wp_side", "output"),
+        ("keeplora_feat_mode", "code"), ("keeplora_feat_transform", "train"), ("keeplora_b_init", "svd"),
+        ("keeplora_head_init", "ncm"), ("keeplora_backbone", "vit_base_patch16_224"), ("keeplora_layers", None),
+        ("keeplora_proj", True), ("cache_backbone", True), ("checkpoint_dir", "checkpoints_main/keeplora"),
+        ("train_prefix", f"keeplora_matched_{ds}_r16_w0.85_f0.99_e10_lr0.001_sout_mcode_bsvd_hncm_p1_Lall_bs64"),
+        ("dataset_name", ds), ("dataset_num_task", n_tasks), ("dataset_init_cls", init), ("dataset_increment", inc),
+    ])
+    cfg.update(over)
+    return cfg
+
+
+def make_keeplora_log(ds, cfg_name, seeds=SEEDS, failed_seed=None, fail_at_task=3, lora_r=16, eps_w=0.85,
+                      eps_f=0.99, epochs=10, lr=0.001, batch=64, backbone="vit_base_patch16_224",
+                      start="2026-11-22 08:00:00", matrix_seed=32, base_acc=90.0, extra_config=None,
+                      saturate=False):
+    """run_keeplora.py cell log: run_config_sweep-style per-seed blocks (Experiment header,
+    Configuration dump, the [KeepLoRA] lines of main._keeplora_before_train / _after_train,
+    the ', lr:' epoch field, no merge / drift / alignment), '[FAILED]' for a failed seed, the
+    SUMMARY block (' | n=k/n' when a seed failed) and the 'SWEEP SUMMARY [keeplora-{ds}]' line.
+    `saturate` makes the last task fill two bases (the parser must flag it).  Returns (text, info)."""
+    clock = Clock(start)
+    n_default, init, inc = DATA_TABLE.get(ds, (10, 10, 10))
+    incs = task_increments(TOTAL_CLASSES.get(ds, 100), init, inc)
+    n_tasks = len(incs)
+    pre_r = "[run_keeplora.py] => "
+    pre_m = "[main.py] => "
+    lines, infos, ok, failed = [], OrderedDict(), [], []
+    fa_l, aa_l, ff_l, acc_l, avg_l = [], [], [], [], []
+    bb = "in21k" if "in21k" in backbone else "matched"
+    tag = "vit_base_patch16_224." + ("augreg_in21k" if bb == "in21k" else "augreg2_in21k_ft_in1k")
+    n_slices, d = 48, 768
+    for seed in seeds:
+        rng = np.random.RandomState(matrix_seed * 1000 + seed)
+        rows = synth_rows(n_tasks, rng, base=base_acc, drop=0.5)
+        totals = totals_from_rows(rows, incs, TEST_PER_CLASS.get(ds, 100))
+        cfg = keeplora_config(ds, seed, init, inc, n_tasks, lora_r=lora_r, keeplora_eps_w=eps_w, keeplora_eps_f=eps_f,
+                              train_epochs=epochs, train_base_lr=lr, train_batch_size=batch, keeplora_backbone=backbone,
+                              train_prefix=f"keeplora_{bb}_{ds}_r{lora_r}_w{eps_w:g}_f{eps_f:g}_e{epochs}_lr{lr:g}"
+                                           f"_sout_mcode_bsvd_hncm_p1_Lall_bs{batch}",
+                              **(extra_config or {}))
+        lines.append(f"{clock.tick(0.1)} {pre_r}")
+        lines.append("=" * 80)
+        lines.append(f"{clock.tick(0.1)} {pre_r}Experiment: {ds} {EM} {cfg_name} {EM} seed {seed}")
+        t_start = clock.t
+        lines.append(f"{clock.tick(0.1)} {pre_m}Configuration:")
+        for k, v in cfg.items():
+            lines.append(f"{clock.tick(0.0)} {pre_m}  {k}: {v}")
+        lines.append(f"{clock.tick(0.5)} {pre_m}[KeepLoRA] backbone {backbone} -> {tag}")
+        info = {"seed": seed, "status": "ok", "subspace": [], "design": []}
+        cols = [300 + 2 * s for s in range(n_slices)]
+        for t in range(n_tasks):
+            if failed_seed == seed and t == fail_at_task:
+                lines.append(f"{clock.tick(0.2)} {pre_m}[Experiment {ds}_{cfg_name}] RuntimeError: CUDA out of memory")
+                lines.append(f"{clock.tick(0.0)} {pre_m}Traceback (most recent call last):")
+                lines.append('  File "main.py", line 2930, in run_single_experiment')
+                lines.append("RuntimeError: CUDA out of memory")
+                info["status"] = "crashed"
+                break
+            lines.append(f"{clock.tick(0.2)} {pre_m}[Training] Task {t} (keeplora)")
+            if t == 0:
+                lines.append(f"{clock.tick(1.0)} {pre_m}[KeepLoRA] Task 0: weight subspace eps_w={eps_w} side=output | "
+                             f"cols min {min(cols)} max {max(cols)} over {n_slices} slices")
+            lines.append(f"{clock.tick(0.5)} {pre_m}[KeepLoRA] Task {t}: head {t} set to class means")
+            leak = 2.0e-7 + 1e-8 * t
+            n_batches = 78 if ds == "cifar224" else 37
+            lines.append(f"{clock.tick(1.0)} {pre_m}[KeepLoRA] Task {t}: A/B designed for {n_slices} slices from "
+                         f"{n_batches} batches | basis cols min {min(cols)} max {max(cols)} | max|U^T A| {leak:.3e} | B init svd")
+            info["design"].append((t, leak, max(cols)))
+            lines.append(f"{clock.tick(0.1)} {pre_m}[Training] Model21(trainable_params={4 * d * lora_r * 12 + incs[t] * 769:,}, ...)")
+            for e in range(epochs):
+                lr_e = lr / 25 if e == 0 else lr * max(0.02, 1.0 - e / epochs)
+                lines.append(f"{clock.tick(2.0)} {pre_m}[Training] Epoch {e + 1}/{epochs}, Loss: {0.8 / (e + 1):.4f}, "
+                             f"Acc: {0.85 + 0.007 * e:.4f}, lr: {lr_e:.3e}")
+            added = [1 + (s + t) % 4 for s in range(n_slices)]
+            if saturate and t == n_tasks - 1:
+                added[0], added[1] = d - cols[0], d - cols[1]
+            cols = [c + a for c, a in zip(cols, added)]
+            full = sum(c >= d for c in cols)
+            lines.append(f"{clock.tick(1.0)} {pre_m}[KeepLoRA] subspace task {t} eps_f={eps_f} mode=code | "
+                         f"cols min {min(cols)} max {max(cols)} mean {np.mean(cols):.1f} | "
+                         f"added min {min(added)} max {max(added)} | full {full}/{n_slices} | cols {cols} | added {added}")
+            info["subspace"].append((t, list(cols), full))
+            lines.append(f"{clock.tick(2.0)} {pre_m}[Evaluation] Task {t}")
+            lines.append(f"{clock.tick(0.0)} {pre_m}[Evaluation] Total Acc: {totals[t]:.2f}, Grouped: {_fmt_list(rows[t])}")
+            faa, ffm, ffd, asa = compute_metrics_ref(rows[: t + 1])
+            lines.append(f"{clock.tick(0.0)} {pre_m}[Evaluation] FAA: {faa:.2f}, FFM: {ffm:.2f}, FFD: {ffd:.2f}, ASA: {asa:.2f}")
+        time_s = (clock.t - t_start).total_seconds()
+        lines.append(f"{clock.tick(0.1)} {pre_r}Time: {time_s:.1f}s")
+        if info["status"] == "crashed":
+            failed.append(seed)
+            lines.append(f"{clock.tick(0.0)} {pre_r}[FAILED] {ds} {EM} {cfg_name} {EM} seed {seed}: no result "
+                         "(see the [Experiment ...] error above); excluded from the summary")
+            info["faa"] = info["ffm"] = info["asa"] = 0.0
+        else:
+            ok.append(seed)
+            faa, ffm, ffd, asa = compute_metrics_ref(rows)
+            info.update(faa=faa, ffm=ffm, ffd=ffd, asa=asa, micro_acc=totals[-1], avg=float(np.mean(totals)),
+                        rows=rows, totals=totals)
+            fa_l.append(faa)
+            aa_l.append(asa)
+            ff_l.append(ffm)
+            acc_l.append(totals[-1])
+            avg_l.append(float(np.mean(totals)))
+            lines.append(f"{clock.tick(0.0)} {pre_r}[KeepLoRA] seed {seed}: FA {faa:.2f} | AA {asa:.2f} | FF {ffm:.2f} | "
+                         f"micro ACC {totals[-1]:.2f} | AVG {np.mean(totals):.2f} | curve {[round(v, 2) for v in totals]}")
+        infos[seed] = info
+    lines.append(f"{clock.tick(0.1)} {pre_r}")
+    lines.append("=" * 80)
+    lines.append(f"{clock.tick(0.1)} {pre_r}SUMMARY  {ds.upper()} {EM} {cfg_name.upper()}")
+    lines.append(f"{clock.tick(0.1)} {pre_r}" + "=" * 80)
+    summ = None
+    if ok:
+        lines.append(f"{clock.tick(0.1)} {pre_r}  ASA: {_pm(aa_l)} | FAA: {_pm(fa_l)} | FFM: {_pm(ff_l)}"
+                     + (f" | n={len(ok)}/{len(seeds)}" if failed else ""))
+        lines.append(f"{clock.tick(0.1)} {pre_r}SWEEP SUMMARY [keeplora-{ds}] {cfg_name}: FA {_pm(fa_l)} | AA {_pm(aa_l)} | "
+                     f"FF {_pm(ff_l)} | micro ACC {_pm(acc_l)} | AVG {_pm(avg_l)} | seeds {ok} | failed {failed}")
+        summ = {"faa": float(np.mean(fa_l)), "faa_sd": float(np.std(fa_l)), "asa": float(np.mean(aa_l)),
+                "ffm": float(np.mean(ff_l)), "micro_acc": float(np.mean(acc_l)), "avg": float(np.mean(avg_l))}
+    else:
+        lines.append(f"{clock.tick(0.1)} {pre_r}[FAILED] [keeplora-{ds}] {cfg_name}: every seed failed {failed}; no summary")
+    lines.append(f"{clock.tick(0.1)} {pre_r}" + "=" * 80 + "\n")
+    return "\n".join(lines) + "\n", {"seeds": infos, "ok": ok, "failed": failed, "summary": summ, "n_tasks": n_tasks}
+
+
 def make_inflora_log(ds, cfg_name, seeds=SEEDS, failed_seed=None, fail_at_task=3, lora_r=10, lamb=0.95,
                      epochs=20, lr=0.0005, batch=128, backbone="vit_base_patch16_224_in21k",
                      start="2026-11-20 08:00:00", matrix_seed=30, base_acc=90.0, extra_config=None):
@@ -1154,6 +1287,11 @@ def build_rebuttal_tree(root, fig_dir):
     t, i = make_inflora_log("imagenetr", "inflora_in21k_imagenetr", lamb=0.98, epochs=50, base_acc=79.0, matrix_seed=31,
                             start="2026-11-21 08:00:00")
     put("inflora_inr", "imagenetr", "inflora_in21k_imagenetr", t, i)
+    t, i = make_keeplora_log("cifar224", "keeplora_matched_cifar224", failed_seed=1994, base_acc=89.0)
+    put("keeplora_cifar", "cifar224", "keeplora_matched_cifar224", t, i)
+    t, i = make_keeplora_log("imagenetr", "keeplora_matched_imagenetr", base_acc=78.0, matrix_seed=33,
+                             start="2026-11-23 08:00:00", saturate=True)
+    put("keeplora_inr", "imagenetr", "keeplora_matched_imagenetr", t, i)
     return fx
 
 

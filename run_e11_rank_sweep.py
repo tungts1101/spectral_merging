@@ -1,4 +1,4 @@
-"""LoRA rank sweep on ImageNet-R (rebuttal E11): r in {8, 16, 32, 64, 128} at the
+"""LoRA rank sweep on ImageNet-R (rebuttal E11): r in {8, 16, 64, 128} at the
 headline posture, kept directions at p = 0.9, merge time.
 
 Rank changes training, so every r != 64 trains a new 10-task chain under its own
@@ -27,9 +27,9 @@ figures_data/e11_rank_imagenetr.csv for scripts/fig10_rank.py.
 
 Run
     python run_e11_rank_sweep.py --dry-run                   # 5 cells, no torch needed
-    python run_e11_rank_sweep.py --ranks 8 16 32 128         # training stream (about 2 h per seed)
+    python run_e11_rank_sweep.py --ranks 8 16 128            # training stream (about 2 h per seed)
     python run_e11_rank_sweep.py --ranks 64                  # paired reference, cached
-    python run_e11_rank_sweep.py --alpha-fixed 128 --ranks 8 16 32 128
+    python run_e11_rank_sweep.py --alpha-fixed 128 --ranks 8 16 128
     python run_e11_rank_sweep.py --smoke                     # r = 8, seed 1993, 2 tasks x 1 epoch
     python bench_svd.py && python parse_logs.py e11 && python scripts/fig10_rank.py
 """
@@ -40,7 +40,7 @@ from collections import OrderedDict
 
 import rebuttal_common as rc
 
-RANKS = (8, 16, 32, 64, 128)
+RANKS = (8, 16, 64, 128)      # strategy 2026-11-10: r in {8, 16, 128} + the r = 64 reference
 DS = "imagenetr"
 HEADLINE_R = 64
 PARAMS_PER_RANK = 129_024          # PEFT LoRA floats per unit rank (qkv + fc1 + fc2, 12 blocks):
@@ -114,7 +114,7 @@ def build_parser():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     rc.add_common_args(ap, datasets=(DS,))
     ap.add_argument("--ranks", nargs="+", type=int, default=None,
-                    help="LoRA ranks (default 8 16 32 64 128; --smoke defaults to 8)")
+                    help="LoRA ranks (default 8 16 64 128; --smoke defaults to 8)")
     ap.add_argument("--alpha-fixed", type=int, default=None,
                     help="keep model_lora_alpha at this value for every rank (default 2 r)")
     ap.add_argument("--no-analyze", action="store_true",

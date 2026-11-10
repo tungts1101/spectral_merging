@@ -4,9 +4,11 @@ models/sgp_lora.py, models/full_finetune.py, models/distillator.py, lora.py).
 
 InfLoRA (Liang & Li, CVPR 2024) is ported from github.com/liangyanshuo/InfLoRA
 (section "InfLoRA" below; its projection math is the NumPy module
-inflora_gpm.py).
+inflora_gpm.py). KeepLoRA (Luo et al., ICLR 2026) is ported from
+github.com/MaolinLuo/KeepLoRA (section "KeepLoRA" below; its subspace math is
+the NumPy module keeplora_subspace.py).
 
-Self-contained (torch + timm, plus NumPy for the InfLoRA port). All wrappers
+Self-contained (torch + timm, plus NumPy for the InfLoRA / KeepLoRA ports). All wrappers
 share one interface driven by main.Learner:
     forward(x) -> features            (num_classes=0 ViT, pooled CLS)
     get_param_groups()                -> trainable params for the optimizer
@@ -34,6 +36,14 @@ from inflora_gpm import (
     dualgpm_step,
     pack_basis,
     unpack_basis,
+)
+from keeplora_subspace import (
+    basis_leakage as keeplora_basis_leakage,
+    extend_subspace as keeplora_extend_subspace,
+    gradient_init as keeplora_gradient_init,
+    pack_basis as keeplora_pack_basis,
+    unpack_basis as keeplora_unpack_basis,
+    weight_subspace as keeplora_weight_subspace,
 )
 
 
@@ -1153,10 +1163,273 @@ class InfLoRAViT(BaseAdapterViT):
         return rows
 
 
+# KeepLoRA ====================================================================
+# KeepLoRA (Luo et al., "KeepLoRA: Continual Learning with Residual Gradient
+# Adaptation", ICLR 2026, arXiv:2601.19659) ported from the official MTIL code
+# (github.com/MaolinLuo/KeepLoRA, branch v1: MTIL/model/peft_modules.py,
+# peft_vit.py, prin_subspace.py, trainer/trainer.py, customClip.py). Upstream
+# adapts q, k, v (the three row blocks of the fused in_proj) and the attention
+# out-projection of every CLIP block with rank-16 LoRA (lora_alpha 1, scaling
+# 1/r) and, per task, (1) averages the gradient of the FROZEN weights over one
+# pass of the task loader with the adapters off, (2) projects it away from the
+# module's protected basis and initialises A = U_r (frozen) and B = S_r V_r^T
+# (trained) from the SVD of the residual, (3) subtracts scaling * (A B)^T from
+# the weight so the network is unchanged at the start, (4) trains B (+ head)
+# with AdamW 1e-3, OneCycleLR, 10 epochs, (5) merges the adapter into the
+# weight, (6) runs a no-grad pass with the merged weights to accumulate the
+# module inputs and extends the basis at energy 0.99. The basis starts (task 0,
+# before any training) from the principal subspace of the pre-trained weight at
+# energy 0.85. Every step maps onto the merge-family path of main.py (fold via
+# merge_lora_weights, trainable_state caching with the basis in fixed-size
+# buffers, compute_covariances-style input hooks for the statistics); the
+# linear algebra is keeplora_subspace.py (NumPy, float64, unit-tested here).
+
+
+class KeepLoRALinear(nn.Module):
+    """KeepLoRA on one nn.Linear whose output rows split into ``n_slices``
+    equal blocks with their own (A, B, basis): 3 slices for timm's fused qkv
+    (q, k, v -- upstream's in_proj_weight rows), 1 for attn.proj (upstream's
+    out_proj). Upstream module ``KeepLoRA``: ``lora_A`` (in, r) is a plain
+    tensor overwritten by the gradient design before every task, ``lora_B``
+    (r, out) the trained parameter, forward adds ``scaling * x A B``.
+
+    Buffers: ``lora_active``; ``basis`` (n_slices, in, in) float32 zero-padded
+    and ``basis_cols`` (n_slices,) -- the protected subspace U of every slice,
+    carried in trainable_state so a cached task state restores it."""
+
+    def __init__(self, linear: nn.Linear, r: int, n_slices: int, scaling: float):
+        super().__init__()
+        assert linear.out_features % n_slices == 0, "output rows must split into equal slices"
+        self.linear = linear
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.r = int(r)
+        self.n_slices = int(n_slices)
+        self.out_slice = linear.out_features // n_slices
+        self.scaling = float(scaling)
+        d, w = self.in_features, linear.weight
+        self.lora_A = nn.Parameter(torch.zeros(n_slices, d, r, device=w.device, dtype=w.dtype),
+                                   requires_grad=False)
+        self.lora_B = nn.Parameter(torch.zeros(n_slices, r, self.out_slice, device=w.device, dtype=w.dtype))
+        self.register_buffer("lora_active", torch.tensor(True))
+        self.register_buffer("basis", torch.zeros(n_slices, d, d, dtype=torch.float32))
+        self.register_buffer("basis_cols", torch.zeros(n_slices, dtype=torch.int64))
+
+    def _delta(self) -> torch.Tensor:
+        """scaling * (A_s B_s)^T stacked over the slices -> (out, in) in the
+        weight's layout (upstream get_delta_weight per slice, rows q | k | v)."""
+        d = torch.einsum("sir,sro->soi", self.lora_A, self.lora_B)   # (s, out_slice, in)
+        return self.scaling * d.reshape(self.out_features, self.in_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.lora_active:
+            return F.linear(x, self.linear.weight + self._delta(), self.linear.bias)
+        return self.linear(x)
+
+    @torch.no_grad()
+    def merge_lora_weights(self, lora_active: bool = True) -> None:
+        """Fold the adapter into the weight and zero B (upstream
+        merge_keeplora_weights). A is kept: the next task redesigns it."""
+        self.linear.weight.data.add_(self._delta().to(self.linear.weight.dtype))
+        self.lora_B.data.zero_()
+        self.lora_active.fill_(lora_active)
+
+    @torch.no_grad()
+    def subtract_init(self) -> None:
+        """Upstream subtract_keeplora_weights: W <- W - scaling (A B)^T right
+        after the SVD initialisation, so W + delta equals the old W."""
+        self.linear.weight.data.sub_(self._delta().to(self.linear.weight.dtype))
+
+    def slice_rows(self, s: int):
+        return slice(s * self.out_slice, (s + 1) * self.out_slice)
+
+    def get_basis(self, s: int):
+        """float64 (in, cols) basis of slice s, or None when empty."""
+        return keeplora_unpack_basis(self.basis[s].detach().cpu().numpy(), int(self.basis_cols[s].item()))
+
+    @torch.no_grad()
+    def set_basis(self, s: int, M) -> None:
+        self.basis[s].copy_(torch.from_numpy(keeplora_pack_basis(M, self.in_features, dtype=np.float32)))
+        self.basis_cols[s] = 0 if M is None else int(np.asarray(M).shape[1])
+
+    @torch.no_grad()
+    def set_init(self, s: int, A, B) -> None:
+        """A (in, r), B (r, out_slice) from keeplora_subspace.gradient_init."""
+        self.lora_A.data[s].copy_(torch.from_numpy(np.ascontiguousarray(A, dtype=np.float32)))
+        if B is None:
+            self.lora_B.data[s].zero_()
+        else:
+            self.lora_B.data[s].copy_(torch.from_numpy(np.ascontiguousarray(B, dtype=np.float32)))
+
+    def cols(self):
+        return [int(c) for c in self.basis_cols.tolist()]
+
+
+class KeepLoRAViT(BaseAdapterViT):
+    """KeepLoRA on the attention of the chosen blocks: ``block_{i}_attn_qkv``
+    (3 slices q / k / v) and, with ``use_proj``, ``block_{i}_attn_proj`` (1
+    slice), registered in lora_modules so compute_covariances-style hooks,
+    merge_lora_weights, finalize_without_lora and trainable_state (which
+    carries the basis buffers) work unchanged. Trainable parameters per task:
+    B only -- 4 x 768 x r per block = 589,824 at r = 16 on 12 blocks (+ head).
+    use_projection stays False (nothing to rebuild from covariances)."""
+
+    def __init__(self, vit_model, r: int = 16, lora_alpha: float = 1.0,
+                 lora_layer: Optional[Iterable[int]] = None, use_proj: bool = True):
+        super().__init__(vit_model)
+        assert r > 0
+        self.r = int(r)
+        self.scaling = float(lora_alpha) / float(r)        # upstream lora_alpha / r (rsLoRA off)
+        layers = list(lora_layer) if lora_layer is not None else list(range(len(vit_model.blocks)))
+        for p in vit_model.parameters():
+            p.requires_grad_(False)
+        for idx, blk in enumerate(vit_model.blocks):
+            if idx not in layers:
+                continue
+            assert blk.attn.qkv.out_features == 3 * blk.attn.qkv.in_features, "expects timm's fused qkv"
+            blk.attn.qkv = KeepLoRALinear(blk.attn.qkv, self.r, 3, self.scaling)
+            self.lora_modules[f"block_{idx}_attn_qkv"] = blk.attn.qkv
+            if use_proj:
+                blk.attn.proj = KeepLoRALinear(blk.attn.proj, self.r, 1, self.scaling)
+                self.lora_modules[f"block_{idx}_attn_proj"] = blk.attn.proj
+
+    def get_param_groups(self):
+        # Upstream build_optimizer: only the tuner's parameters (lora_B; lora_A
+        # is a plain tensor) plus the head, which main.train_backbone adds.
+        return [mod.lora_B for mod in self.lora_modules.values()]
+
+    def set_active(self, flag: bool) -> None:
+        for mod in self.lora_modules.values():
+            mod.lora_active.fill_(bool(flag))
+
+    def base_weights(self) -> Dict[str, torch.Tensor]:
+        """{lora_modules name: the frozen nn.Linear weight} -- the tensors
+        whose task gradient initialises the adapter."""
+        return {name: mod.linear.weight for name, mod in self.lora_modules.items()}
+
+    def basis_cols(self) -> Dict[str, List[int]]:
+        return {name: mod.cols() for name, mod in self.lora_modules.items()}
+
+    @torch.no_grad()
+    def init_weight_subspace(self, eps_w: float, side: str = "output"):
+        """Task-0 step of upstream Framework4MTIL.train_and_evaluate: the
+        principal subspace of every pre-trained slice weight at energy eps_w
+        becomes the first block of its basis (skipped when eps_w <= 1e-8).
+        Returns [(name, slice, cols)]."""
+        rows = []
+        for name, mod in self.lora_modules.items():
+            for s in range(mod.n_slices):
+                W = mod.linear.weight.data[mod.slice_rows(s)].detach().cpu().double().numpy()
+                M = keeplora_weight_subspace(W, eps_w, side)
+                mod.set_basis(s, M)
+                rows.append((name, s, 0 if M is None else int(M.shape[1])))
+        return rows
+
+    @torch.no_grad()
+    def init_from_gradients(self, grads: Dict[str, torch.Tensor], b_init: str = "svd"):
+        """Upstream init_keeplora_with_grad + subtract_keeplora_weights.
+        ``grads``: {lora_modules name: averaged weight.grad (out, in)}. Per
+        slice: G = grad[rows]^T (paper layout), projected away from the basis,
+        A = U_r, B = S_r V_r^T (``b_init='svd'``, branch v1) or B = 0
+        (``'zero'``, the KeepLoRA++ branch); with 'svd' the weight is then
+        shifted by -scaling (A B)^T so the forward pass starts unchanged.
+        Returns [(name, slice, cols, leak = max|U^T A|)]."""
+        if b_init not in ("svd", "zero"):
+            raise ValueError(f"keeplora_b_init must be 'svd' or 'zero', got {b_init!r}")
+        rows = []
+        for name, mod in self.lora_modules.items():
+            g = grads[name].detach().cpu().double()
+            for s in range(mod.n_slices):
+                G = g[mod.slice_rows(s)].t().numpy()                 # (in, out_slice)
+                M = mod.get_basis(s)
+                A, B = keeplora_gradient_init(G, M, mod.r)
+                mod.set_init(s, A, B if b_init == "svd" else None)
+                rows.append((name, s, 0 if M is None else int(M.shape[1]), keeplora_basis_leakage(A, M)))
+            if b_init == "svd":
+                mod.subtract_init()
+        return rows
+
+    @torch.no_grad()
+    def update_feature_subspace(self, grams: Dict[str, np.ndarray], eps_f: float):
+        """Upstream PrinSubspace.update_prin_subspace on the accumulated
+        features: extend every slice's basis with the residual directions of
+        the module input Gram at energy eps_f (the slices of one module share
+        the input, so they see the same Gram but start from their own W_p).
+        Returns [(name, slice, cols, added)]."""
+        rows = []
+        for name, mod in self.lora_modules.items():
+            K = grams[name]
+            for s in range(mod.n_slices):
+                M, added = keeplora_extend_subspace(mod.get_basis(s), K, eps_f)
+                mod.set_basis(s, M)
+                rows.append((name, s, int(M.shape[1]), int(added)))
+        return rows
+
+
+@torch.no_grad()
+def compute_keeplora_grams(backbone, data_loader, mode="code", device="cuda"):
+    """Input statistics of every KeepLoRA module over ``data_loader`` (this
+    repo's (idx, path, x, y) batches), as Grams {name: float64 (in, in)}.
+
+    ``mode='code'``: upstream accumulate_features -- the element-wise mean over
+    batches of the token matrix X_b^T (in, B*L), kept as a running sum on the
+    device; its Gram Xbar Xbar^T is what keeplora_subspace.extend_subspace
+    decomposes. Batches whose token count differs from the first one are
+    skipped (upstream needs drop_last=True; the caller's loader sets it) and
+    counted in the returned ``info``. ``mode='gram'``: the uncentred Gram over
+    all tokens X^T X / n (plain GPM; paper Eq. 3-4 taken literally).
+    Returns (grams, info) with info = {name: (n_batches_used, n_skipped)}."""
+    if mode not in ("code", "gram"):
+        raise ValueError(f"keeplora_feat_mode must be 'code' or 'gram', got {mode!r}")
+    modules = {name: backbone.lora_modules[name] for name in backbone.get_module_names()}
+    acc = {name: None for name in modules}
+    used = {name: 0 for name in modules}
+    skipped = {name: 0 for name in modules}
+    hooks = []
+    for name, module in modules.items():
+        def hook_fn(module, inputs, output, name=name):
+            x = inputs[0].detach().to(device)
+            if x.dim() == 3:
+                x = x.reshape(-1, x.shape[-1])
+            x = x.float()
+            if mode == "gram":
+                stat = x.t() @ x
+                acc[name] = stat if acc[name] is None else acc[name] + stat
+                used[name] += x.shape[0]
+                return
+            xt = x.t()                                   # (in, tokens)
+            if acc[name] is None:
+                acc[name] = xt.clone()
+                used[name] = 1
+            elif xt.shape != acc[name].shape:
+                skipped[name] += 1
+            else:
+                acc[name] += xt
+                used[name] += 1
+        hooks.append(module.register_forward_hook(hook_fn))
+    backbone.to(device)
+    backbone.eval()
+    for batch in data_loader:
+        backbone(batch[-2].to(device))
+    for h in hooks:
+        h.remove()
+    grams = {}
+    for name in modules:
+        if acc[name] is None or used[name] == 0:
+            raise RuntimeError(f"compute_keeplora_grams: no features collected for {name}")
+        if mode == "gram":
+            grams[name] = (acc[name] / used[name]).double().cpu().numpy()
+        else:
+            xbar = acc[name] / used[name]
+            grams[name] = (xbar @ xbar.t()).double().cpu().numpy()
+    info = {name: (used[name], skipped[name]) for name in modules}
+    return grams, info
+
+
 # Factory =====================================================================
 MERGE_FAMILY = (
     "basic_lora", "sgp_lora", "nsp_lora", "full", "full_nsp",
-    "joint_lora", "joint_full", "first_task_lora", "e2lora", "inflora",
+    "joint_lora", "joint_full", "first_task_lora", "e2lora", "inflora", "keeplora",
 )
 
 
@@ -1186,6 +1459,22 @@ def build_recipe_backbone(config):
         logging.info(f"[InfLoRA] backbone {name} -> {pcfg.get('architecture')}.{pcfg.get('tag')}")
         return InfLoRAViT(vit, r=config.get("lora_r", 10),
                           lora_layer=config.get("inflora_layers", None))
+    if method == "keeplora":
+        # KeepLoRA has no published class-incremental ViT setting, so the
+        # default is our matched backbone (vit_base_patch16_224 = augreg2
+        # IN21k -> IN1k, as every other recipe); keeplora_backbone
+        # 'vit_base_patch16_224_in21k' gives the IN21k-only weights (the
+        # E2-LoRA / InfLoRA published backbone). lora_r 16, keeplora_alpha 1
+        # (scaling 1/r), q/k/v + proj on all 12 blocks follow the released
+        # MTIL config (keeplora_order1.yaml, v_adapter_dim 16).
+        name = config.get("keeplora_backbone", "vit_base_patch16_224")
+        vit = timm.create_model(name, pretrained=True, num_classes=0)
+        pcfg = getattr(vit, "pretrained_cfg", None) or {}
+        logging.info(f"[KeepLoRA] backbone {name} -> {pcfg.get('architecture')}.{pcfg.get('tag')}")
+        return KeepLoRAViT(vit, r=config.get("lora_r", 16),
+                           lora_alpha=config.get("keeplora_alpha", 1.0),
+                           lora_layer=config.get("keeplora_layers", None),
+                           use_proj=bool(config.get("keeplora_proj", True)))
     vit = timm.create_model("vit_base_patch16_224", pretrained=True, num_classes=0)
     if config.get("replace_final_norm", False):
         # Reference featurization (inc_net.py:36); default off to match ours.

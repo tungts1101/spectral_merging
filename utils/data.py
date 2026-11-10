@@ -14,7 +14,9 @@ from utils.toolkit import split_images_labels
 #        year = {2023}
 #    }
 
-DATA_ROOT = "/home/lis/data"  # was /mnt/data_drive/tung; mount disappeared 2026-09-16, local copy has identical layout
+# Dataset root: the sakura layout by default; the DATA_ROOT environment variable
+# overrides it on another machine (bio: /home/bio/data), same layout underneath.
+DATA_ROOT = os.environ.get("DATA_ROOT", "/home/lis/data")  # was /mnt/data_drive/tung; mount disappeared 2026-09-16, local copy has identical layout
 os.makedirs(DATA_ROOT, exist_ok=True)
 
 def download_and_extract_dataset(dataset_name, file_id, train_subdir="train", test_subdir="test"):

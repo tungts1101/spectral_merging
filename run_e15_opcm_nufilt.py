@@ -195,8 +195,9 @@ def main(argv=None):
                     help="1 = ImageNet-R grid (default); 2 = best cell per rule on the other datasets")
     ap.add_argument("--regime", choices=("sequential", "independent"), default="sequential",
                     help="sequential (default, the paper's chain) or independent (Appendix E chain)")
-    ap.add_argument("--rules", nargs="+", choices=list(GRIDS), default=list(GRIDS),
-                    help="rules (default opcm nufilt)")
+    ap.add_argument("--rules", nargs="+", choices=list(GRIDS), default=["nufilt"],
+                    help="rules (default nufilt; the plan of 2026-11-10 keeps NUFILT and drops "
+                         "OPCM from the schedule -- pass 'opcm nufilt' to run both)")
     ap.add_argument("--best", nargs="*", default=[], metavar="RULE=TAG",
                     help="stage-2 / independent cell per rule, e.g. opcm=a0.7_sqrt nufilt=rp32_ad1")
     ap.add_argument("--prefix", default=None,

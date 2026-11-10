@@ -935,6 +935,39 @@ def test_e15_opcm_nufilt_inflora():
     assert "InfLoRA port" in text and "| cifar224 | inflora_in21k_cifar224 |" in text
 
 
+def test_e15_keeplora():
+    fx = fixture2()
+    out = os.path.join(fx["out"], "figures_fake_e15k")
+    rc, text = _run_sub(["e15", "--roots", fx["root"], "--out-dir", out])
+    assert rc == 0
+    keep = {r["dataset"]: r for r in _read_csv(os.path.join(out, "e15_keeplora.csv"))}
+    assert set(keep) == {"cifar224", "imagenetr"}
+    c = keep["cifar224"]
+    ck = fx["fx"]["keeplora_cifar"]
+    assert c["n_seeds"] == "2" and c["n_failed"] == "1" and "failed seeds [1994]" in c["flags"]
+    assert abs(float(c["fa"]) - ck["summary"]["faa"]) <= 0.0101 and abs(float(c["sweep_fa"]) - ck["summary"]["faa"]) <= 0.0101
+    assert abs(float(c["micro_acc"]) - ck["summary"]["micro_acc"]) <= 0.0101 and abs(float(c["avg"]) - ck["summary"]["avg"]) <= 0.0101
+    assert c["resolved_backbone"] == "vit_base_patch16_224.augreg2_in21k_ft_in1k" and c["backbone"] == "vit_base_patch16_224"
+    assert c["lora_r"] == "16" and c["eps_w"] == "0.85" and c["eps_f"] == "0.99" and c["wp_side"] == "output"
+    assert c["feat_mode"] == "code" and c["b_init"] == "svd" and c["head_init"] == "ncm" and c["train_epochs"] == "10"
+    last = ck["seeds"][1993]["subspace"][-1]
+    assert int(c["basis_cols_last_max"]) == max(last[1]) and c["basis_full_last"] == "0" and c["skipped_batches"] == "0"
+    assert int(c["basis_cols_task0_max"]) == ck["seeds"][1993]["design"][0][2]
+    assert float(c["leak_max"]) < 1e-5 and "full" not in c["flags"]
+    i = keep["imagenetr"]
+    assert i["n_seeds"] == "3" and i["n_failed"] == "0" and i["basis_full_last"] == "2"
+    assert "2 slices with a full (d x d) basis" in i["flags"] and int(i["basis_cols_last_max"]) == 768
+    r = pl.parse_file(ck["path"])
+    assert sum(x["status"] == "crashed" for x in r) == 1 and all(x["config"]["train_method"] == "keeplora" for x in r)
+    okr = next(x for x in r if x["status"] == "ok")
+    assert okr["sweep"]["micro ACC"][0] == float(f"{ck['summary']['micro_acc']:.2f}") and "FF" in okr["sweep"]
+    pk = pl.parse_keeplora_lines(okr)
+    assert len(pk["subspace"]) == 10 and len(pk["design"]) == 10 and pk["seed_line"]["seed"] == okr["seed"]
+    assert pk["subspace"][0]["mode"] == "code" and len(pk["subspace"][0]["cols"]) == 48 and pk["design"][0]["b_init"] == "svd"
+    assert pk["backbone"] == ("vit_base_patch16_224", "vit_base_patch16_224.augreg2_in21k_ft_in1k")
+    assert "KeepLoRA port" in text and "| cifar224 | keeplora_matched_cifar224 |" in text
+
+
 # ---------------------------------------------------------------------------
 def main(argv=None):
     import argparse

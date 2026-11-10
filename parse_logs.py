@@ -1491,6 +1491,17 @@ INFLORA_SEED_RE = re.compile(
     r"^\[InfLoRA\] seed (\d+): FA (" + _NUM + r") \| AA (" + _NUM + r") \| FF (" + _NUM + r") \| micro ACC ("
     + _NUM + r") \| AVG (" + _NUM + r") \| curve (\[[^\]]*\])")
 INFLORA_BACKBONE_RE = re.compile(r"^\[InfLoRA\] backbone (\S+) -> (\S+)")
+# '[KeepLoRA] ...' lines (main._keeplora_before_train / _after_train, run_keeplora.run_cell, backbones factory)
+KEEPLORA_DESIGN_RE = re.compile(
+    r"^\[KeepLoRA\] Task (\d+): A/B designed for (\d+) slices from (\d+) batches \| basis cols min (\d+) max (\d+) "
+    r"\| max\|U\^T A\| (" + _NUM + r") \| B init (\w+)")
+KEEPLORA_SUBSPACE_RE = re.compile(
+    r"^\[KeepLoRA\] subspace task (\d+) eps_f=(" + _NUM + r") mode=(\w+) \| cols min (\d+) max (\d+) mean (" + _NUM
+    + r") \| added min (\d+) max (\d+) \| full (\d+)/(\d+)(?: \| skipped batches (\d+))? \| cols (\[[^\]]*\]) \| added (\[[^\]]*\])")
+KEEPLORA_SEED_RE = re.compile(
+    r"^\[KeepLoRA\] seed (\d+): FA (" + _NUM + r") \| AA (" + _NUM + r") \| FF (" + _NUM + r") \| micro ACC ("
+    + _NUM + r") \| AVG (" + _NUM + r") \| curve (\[[^\]]*\])")
+KEEPLORA_BACKBONE_RE = re.compile(r"^\[KeepLoRA\] backbone (\S+) -> (\S+)")
 SMALL_TASK_RE = re.compile(r"^\[Training\] small task \((\d+) classes\): epochs=(\d+)")
 
 
@@ -1650,6 +1661,38 @@ def parse_inflora_lines(run):
                                           added=literal(m.group(5))))
             continue
         m = INFLORA_SEED_RE.match(line)
+        if m:
+            out["seed_line"] = OrderedDict(seed=int(m.group(1)), fa=float(m.group(2)), aa=float(m.group(3)),
+                                           ff=float(m.group(4)), micro_acc=float(m.group(5)),
+                                           avg=float(m.group(6)), curve=literal(m.group(7)))
+    return out
+
+
+def parse_keeplora_lines(run):
+    """[KeepLoRA] lines -> dict(backbone, design [per task], subspace [per task], seed_line)."""
+    out = {"backbone": None, "design": [], "subspace": [], "seed_line": None}
+    for line in run["tags"].get("KeepLoRA", []):
+        m = KEEPLORA_BACKBONE_RE.match(line)
+        if m:
+            out["backbone"] = (m.group(1), m.group(2))
+            continue
+        m = KEEPLORA_DESIGN_RE.match(line)
+        if m:
+            out["design"].append(OrderedDict(task=int(m.group(1)), slices=int(m.group(2)), batches=int(m.group(3)),
+                                             cols_min=int(m.group(4)), cols_max=int(m.group(5)),
+                                             leak=float(m.group(6)), b_init=m.group(7)))
+            continue
+        m = KEEPLORA_SUBSPACE_RE.match(line)
+        if m:
+            out["subspace"].append(OrderedDict(task=int(m.group(1)), eps_f=float(m.group(2)), mode=m.group(3),
+                                               cols_min=int(m.group(4)), cols_max=int(m.group(5)),
+                                               cols_mean=float(m.group(6)), added_min=int(m.group(7)),
+                                               added_max=int(m.group(8)), full=int(m.group(9)),
+                                               n_slices=int(m.group(10)),
+                                               skipped=int(m.group(11)) if m.group(11) else 0,
+                                               cols=literal(m.group(12)), added=literal(m.group(13))))
+            continue
+        m = KEEPLORA_SEED_RE.match(line)
         if m:
             out["seed_line"] = OrderedDict(seed=int(m.group(1)), fa=float(m.group(2)), aa=float(m.group(3)),
                                            ff=float(m.group(4)), micro_acc=float(m.group(5)),
@@ -3414,6 +3457,11 @@ E15_INFLORA_COLS = ["dataset", "config_name", "backbone", "resolved_backbone", "
                     "basis_cols_last_max", "basis_cols_monotone", "leak_max", "published_acc", "published_avg", "flags"]
 # InfLoRA Tab. 1 (arXiv:2404.00228 v3, ViT-B/16 IN21K, fixed order, seeds 0-4): ACC / AVG, mean +- std.
 INFLORA_PUBLISHED = {"cifar224": (86.51, 91.70), "imagenetr": (75.65, 80.82)}
+E15_KEEPLORA_COLS = ["dataset", "config_name", "backbone", "resolved_backbone", "lora_r", "eps_w", "eps_f", "wp_side",
+                     "feat_mode", "b_init", "head_init", "train_epochs", "train_base_lr", "train_batch_size", "n_seeds",
+                     "n_failed", "fa", "fa_sd", "aa", "aa_sd", "ffm", "ffm_sd", "micro_acc", "micro_acc_sd", "avg", "avg_sd",
+                     "sweep_fa", "sweep_micro_acc", "trainable_params", "basis_cols_task0_max", "basis_cols_last_max",
+                     "basis_cols_last_mean", "basis_full_last", "leak_max", "skipped_batches", "flags"]
 
 
 def e15_setting(cfg):
@@ -3425,19 +3473,21 @@ def e15_setting(cfg):
     return None
 
 
-@subcommand("e15", "OPCM / NUFILT rows (e15_opcm_nufilt.csv; stage-1 grid + Tab. 6 layout) and the InfLoRA port "
-                   "(e15_inflora.csv from run_inflora logs: FA/AA/FF, micro ACC/AVG, parity gate)")
+@subcommand("e15", "NUFILT (and OPCM) rows (e15_opcm_nufilt.csv; stage-1 grid + Tab. 6 layout), the KeepLoRA port "
+                   "(e15_keeplora.csv from run_keeplora logs: FA/AA/FF, micro ACC/AVG, basis growth) and the InfLoRA "
+                   "port (e15_inflora.csv, parity gate)")
 def cmd_e15(argv):
     p = argparse.ArgumentParser(prog="parse_logs.py e15", description=cmd_e15.__doc__)
     _common_args(p)
     p.add_argument("--out-dir", default="figures_data")
     p.add_argument("--select-on", default="imagenetr", help="stage-1 dataset whose best cell per rule is the Tab. 6 row")
     args = p.parse_args(argv)
-    runs = _load_tags(args, capture_tags=("InfLoRA", "Freeze", "MergeStat"))
+    runs = _load_tags(args, capture_tags=("InfLoRA", "KeepLoRA", "Freeze", "MergeStat"))
     sel = [r for r in runs if str(r["config"].get("train_merge")) in E15_RULES]
     infl = [r for r in runs if str(r["config"].get("train_method")) == "inflora"]
-    if not sel and not infl:
-        print("(no opcm / nufilt / inflora runs found; nothing written)")
+    keep = [r for r in runs if str(r["config"].get("train_method")) == "keeplora"]
+    if not sel and not infl and not keep:
+        print("(no opcm / nufilt / keeplora / inflora runs found; nothing written)")
         return 0
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -3502,6 +3552,80 @@ def cmd_e15(argv):
         print(markdown_table(table, ["method"] + datasets))
     else:
         print("(no opcm / nufilt runs found)")
+
+    # ---- KeepLoRA port -----------------------------------------------------------------
+    rows = []
+    for c in aggregate(keep, ("dataset", "config_name"), metrics=_CELL_METRICS):
+        members = _members(keep, c, ("dataset", "config_name"))
+        ok = _ok(members)
+        cfg = members[0]["config"]
+        info = [parse_keeplora_lines(m) for m in ok]
+        micro = [m["totals"][-1] for m in ok if m["totals"]]
+        avg = [float(np.mean(m["totals"])) for m in ok if m["totals"]]
+        sweep = next((m["sweep"] for m in members if m.get("sweep")), None)
+        t0_max, last_max, last_mean, full_last, leaks, skipped = [], [], [], [], [], 0
+        for i in info:
+            if i["design"]:
+                t0_max.append(i["design"][0]["cols_max"])
+            if i["subspace"]:
+                last_max.append(i["subspace"][-1]["cols_max"])
+                last_mean.append(i["subspace"][-1]["cols_mean"])
+                full_last.append(i["subspace"][-1]["full"])
+                skipped += sum(s["skipped"] for s in i["subspace"])
+            leaks.extend(d["leak"] for d in i["design"])
+        params = sorted({m["trainable_params"] for m in members if m["trainable_params"] is not None})
+        row = OrderedDict(dataset=c["dataset"], config_name=c["config_name"], backbone=cfg.get("keeplora_backbone"),
+                          resolved_backbone=next((i["backbone"][1] for i in info if i["backbone"]), None),
+                          lora_r=cfg.get("lora_r"), eps_w=cfg.get("keeplora_eps_w"), eps_f=cfg.get("keeplora_eps_f"),
+                          wp_side=cfg.get("keeplora_wp_side"), feat_mode=cfg.get("keeplora_feat_mode"),
+                          b_init=cfg.get("keeplora_b_init"), head_init=cfg.get("keeplora_head_init"),
+                          train_epochs=cfg.get("train_epochs"), train_base_lr=cfg.get("train_base_lr"),
+                          train_batch_size=cfg.get("train_batch_size"))
+        row.update(_std_metrics(c))
+        row["n_failed"] = c["n_failed"]
+        row["micro_acc"], row["micro_acc_sd"] = _mean(micro), _sd(micro)
+        row["avg"], row["avg_sd"] = _mean(avg), _sd(avg)
+        row["sweep_fa"] = sweep["FA"][0] if sweep and "FA" in sweep else None
+        row["sweep_micro_acc"] = sweep["micro ACC"][0] if sweep and "micro ACC" in sweep else None
+        row["trainable_params"] = params[0] if len(params) == 1 else (params or None)
+        row["basis_cols_task0_max"] = max(t0_max) if t0_max else None
+        row["basis_cols_last_max"] = max(last_max) if last_max else None
+        row["basis_cols_last_mean"] = _mean(last_mean)
+        row["basis_full_last"] = max(full_last) if full_last else None
+        row["leak_max"] = max(leaks) if leaks else None
+        row["skipped_batches"] = skipped
+        flags = []
+        if c["n_failed"]:
+            flags.append(f"failed seeds {c['failed_seeds']}")
+        if row["basis_full_last"]:
+            flags.append(f"{row['basis_full_last']} slices with a full (d x d) basis: no residual left to learn in")
+        if row["leak_max"] is not None and row["leak_max"] > 1e-5:
+            flags.append(f"max|U^T A| {row['leak_max']:.2e} > 1e-5")
+        if skipped:
+            flags.append(f"{skipped} feature batches skipped (unequal batch size)")
+        if row["sweep_fa"] is not None and row["fa"] is not None and abs(row["sweep_fa"] - row["fa"]) > 0.0101:
+            flags.append("SWEEP SUMMARY FA differs from the recomputed mean")
+        row["flags"] = "; ".join(flags)
+        rows.append(row)
+    rows.sort(key=lambda r: (str(r["dataset"]), str(r["config_name"])))
+    if rows:
+        path = os.path.join(args.out_dir, "e15_keeplora.csv")
+        write_csv(path, rows, E15_KEEPLORA_COLS)
+        _wrote(path, len(rows), "KeepLoRA cells")
+        for r in rows:
+            r["FA"], r["AA"], r["FF"] = pm(r["fa"], r["fa_sd"]), pm(r["aa"], r["aa_sd"]), pm(r["ffm"], r["ffm_sd"])
+            r["micro ACC"], r["AVG"] = pm(r["micro_acc"], r["micro_acc_sd"]), pm(r["avg"], r["avg_sd"])
+            r["params"] = (f"{r['trainable_params']:,}" if isinstance(r["trainable_params"], int)
+                           else ("-" if r["trainable_params"] is None else str(r["trainable_params"])))
+            r["basis cols (task0 max / last max / last mean)"] = (
+                f"{r['basis_cols_task0_max']} / {r['basis_cols_last_max']} / "
+                f"{r['basis_cols_last_mean']:.0f}" if r["basis_cols_last_mean"] is not None else "-")
+            r["switches"] = f"w{r['eps_w']} f{r['eps_f']} {r['wp_side']} {r['feat_mode']} B={r['b_init']} head={r['head_init']}"
+        print("\n### KeepLoRA port (run_keeplora.py): task-equal FA/AA/FF, micro ACC / AVG and basis growth")
+        print(markdown_table(rows, ["dataset", "config_name", "backbone", "switches", "n_seeds", "n_failed", "FA", "AA", "FF",
+                                    "micro ACC", "AVG", "params", "basis cols (task0 max / last max / last mean)", "flags"]))
+    else:
+        print("(no keeplora runs found)")
 
     # ---- InfLoRA port ------------------------------------------------------------------
     rows = []

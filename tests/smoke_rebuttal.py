@@ -49,7 +49,7 @@ for p in (ROOT, HERE):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-MODULES = ("merge_ops.py", "covstats.py", "diagnostics.py", "driftsolve.py")
+MODULES = ("merge_ops.py", "covstats.py", "diagnostics.py", "driftsolve.py", "keeplora_subspace.py")
 TEST_FILES = ("tests/_stubs.py", "tests/smoke_rebuttal.py", "tests/check_tracked_imports.py")
 FORBIDDEN_IMPORTS = ("timm", "peft", "helper", "main", "backbones", "merging_sota")
 

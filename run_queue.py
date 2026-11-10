@@ -11,14 +11,17 @@ Streams
               the E2 tuning record / time table.  Read the time table before
               starting the GPU streams.
     smoke     every driver's --smoke cell (2 tasks x 1 epoch, logs_main/smoke),
-              run_inflora --smoke twice (second must hit the cache), main --smoke-inflora.
+              run_keeplora --smoke twice (second must hit the cache), main --smoke-keeplora.
               --clean-smoke removes the smoke directories afterwards.
     cached    Stage-2-only jobs on the cached headline chains, in the plan's
-              order: E8, E10 merge ops, E15a, E7, E5 (+E3 timers), E9, E6, E12.
-    training  jobs that train new chains, in the plan's order: E14, E13, InfLoRA
-              parity then CUB/Cars, E11, E10 L2M pilot + report.
-    optional  E1 long splits, E15a independent regime (--indep-prefix), InfLoRA
-              matched backbone, E9 on long chains, InfLoRA CUB/Cars grid.
+              order: E8, E10 merge ops, E15a (NUFILT), E7, E5 (+E3 timers), E9, E6, E12.
+    training  jobs that train new chains, in the plan's order: E14, E13, KeepLoRA
+              main stage, E11, E10 L2M pilot + report.
+    optional  E1 long splits, E15a independent regime (--indep-prefix), KeepLoRA
+              grid and IN21k-only backbone, E9 on long chains.
+Plan change of 2026-11-10: the scheduled E15 baselines are KeepLoRA (run_keeplora.py)
+and NUFILT; the InfLoRA port (run_inflora.py, main --smoke-inflora) and the OPCM
+rule (run_e15_opcm_nufilt.py --rules opcm) stay in the repo but are not queued.
 The cached and training streams are designed to run at the same time (one
 process each): every cached job owns an isolated checkpoint directory, every
 training job a fresh prefix.
@@ -71,7 +74,7 @@ def build_streams(args):
     s["smoke"] = [
         step("smoke-e8", [py, "run_e8_trunc_vs_damp.py", "--smoke"]),
         step("smoke-e10", [py, "run_e10_step_control.py", "--part", "merge", "--smoke"]),
-        step("smoke-e15", [py, "run_e15_opcm_nufilt.py", "--stage", "1", "--smoke"]),
+        step("smoke-e15", [py, "run_e15_opcm_nufilt.py", "--stage", "1", "--smoke"], "NUFILT cells (default rules)"),
         step("smoke-e7", [py, "run_e7_adaptive_alpha.py", "--smoke"]),
         step("smoke-e5", [py, "run_covmode.py", "--smoke"]),
         step("smoke-e9", [py, "run_driftdiag.py", "--splits", "t10", "--smoke"]),
@@ -80,9 +83,9 @@ def build_streams(args):
         step("smoke-e13", [py, "run_e13_fewshot.py", "--smoke"]),
         step("smoke-e11", [py, "run_e11_rank_sweep.py", "--smoke"]),
         step("smoke-e1", [py, "run_long.py", "--ds", "cifar224", "--split", "t20", "--smoke"]),
-        step("smoke-inflora-1", [py, "run_inflora.py", "--smoke"], "first pass trains 2 tasks"),
-        step("smoke-inflora-2", [py, "run_inflora.py", "--smoke"], "second pass must hit the cache with identical Total Acc"),
-        step("smoke-main", [py, "main.py", "--smoke-inflora"], "legacy eight recipes + the InfLoRA cell"),
+        step("smoke-keeplora-1", [py, "run_keeplora.py", "--smoke"], "first pass trains 2 tasks"),
+        step("smoke-keeplora-2", [py, "run_keeplora.py", "--smoke"], "second pass must hit the cache with identical Total Acc"),
+        step("smoke-main", [py, "main.py", "--smoke-keeplora"], "legacy eight recipes + the KeepLoRA cell"),
         step("smoke-driftdiag-validate", [py, "run_driftdiag.py", "--validate", "--smoke"],
              "drift_diag on/off must give identical FAA lines"),
     ]
@@ -90,8 +93,8 @@ def build_streams(args):
     s["cached"] = [
         step("e8", [py, "run_e8_trunc_vs_damp.py"], "A1 evidence: truncation vs damped interpolation, C/P exports"),
         step("e10-merge", [py, "run_e10_step_control.py", "--part", "merge"], "clip / scale_fro at matched norm"),
-        step("e15-stage1", [py, "run_e15_opcm_nufilt.py", "--stage", "1"], "OPCM / NUFILT grid on ImageNet-R"),
-        step("e15-stage2", [py, "run_e15_opcm_nufilt.py", "--stage", "2"], "best cell per rule on the other datasets"),
+        step("e15-stage1", [py, "run_e15_opcm_nufilt.py", "--stage", "1"], "NUFILT grid on ImageNet-R (4 cells)"),
+        step("e15-stage2", [py, "run_e15_opcm_nufilt.py", "--stage", "2"], "best NUFILT cell on the other datasets"),
         step("e7-calibrate", [py, "run_e7_adaptive_alpha.py", "--calibrate"], "tau / kappa so mean alpha = 0.30 on ImageNet-R"),
         step("e7-run", [py, "run_e7_adaptive_alpha.py", "--run", "--with-reference"], "specnorm + featshift, 4 datasets"),
         step("e7-gcv", [py, "run_e7_adaptive_alpha.py", "--lambda-gcv"], "data-free lambda"),
@@ -105,8 +108,7 @@ def build_streams(args):
     s["training"] = [
         step("e14", [py, "run_e14_valsplit.py"], "90 % chains + validation-selected grid"),
         step("e13", [py, "run_e13_fewshot.py"], "few-shot per task, K 5 / 20"),
-        step("inflora-parity", [py, "run_inflora.py", "--stage", "parity"], "CIFAR-100 / ImageNet-R vs published numbers"),
-        step("inflora-cubcars", [py, "run_inflora.py", "--stage", "cubcars"], "only after the parity gate passes"),
+        step("keeplora-main", [py, "run_keeplora.py", "--stage", "main"], "KeepLoRA, 4 datasets x 3 seeds, our backbone"),
         step("e11", [py, "run_e11_rank_sweep.py"], "LoRA rank sweep on ImageNet-R"),
         step("e10-l2m-pilot", [py, "run_e10_step_control.py", "--part", "l2m-pilot"], "3-task pilot, weights 0.1 / 1 / 10"),
         step("e10-l2m-report", [py, "run_e10_step_control.py", "--part", "l2m-report"],
@@ -116,8 +118,8 @@ def build_streams(args):
     opt = [
         step("e1-long", [py, "run_long.py"], "20 / 50-task reruns (train_epochs 5 at 50 tasks)"),
         step("e9-long", [py, "run_driftdiag.py", "--splits", "t20", "t50"], "needs the E1 chains"),
-        step("inflora-matched", [py, "run_inflora.py", "--stage", "matched"], "InfLoRA on our backbone"),
-        step("inflora-grid", [py, "run_inflora.py", "--stage", "grid"], "CUB / Cars lr x eps, seed 1993"),
+        step("keeplora-grid", [py, "run_keeplora.py", "--stage", "grid"], "one switch per cell, ImageNet-R / CIFAR-100, seed 1993"),
+        step("keeplora-in21k", [py, "run_keeplora.py", "--stage", "in21k"], "KeepLoRA on the IN21k-only backbone"),
     ]
     if args.indep_prefix:
         opt.insert(0, step("e15-indep", [py, "run_e15_opcm_nufilt.py", "--stage", "1", "--regime",
@@ -173,6 +175,7 @@ def clean_smoke(dry_run):
     targets = [rc.SMOKE_LOG_ROOT]
     targets += glob.glob(os.path.join(rc.REBUTTAL_CKPT_ROOT, "*smoke*"))
     targets += glob.glob(os.path.join(rc.CHECKPOINT_ROOT, "inflora", "*smoke*"))
+    targets += glob.glob(os.path.join(rc.CHECKPOINT_ROOT, "keeplora", "*smoke*"))
     for t in targets:
         if not os.path.exists(t):
             continue
