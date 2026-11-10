@@ -33,9 +33,10 @@ Stages (--stage):
     in21k    the four datasets on vit_base_patch16_224_in21k, 3 seeds (optional)
     grid     ImageNet-R and CIFAR-100, first seed, one switch changed per cell:
              eps_w 0.5 | eps_w 0 (no weight subspace, upstream ablation iii) |
-             wp_side input | feat_mode gram | b_init zero (KeepLoRA++ branch) |
-             lr 5e-4 | head_init default  (7 variants x 2 datasets = 14 cells;
-             --variants picks a subset)
+             eps_f 0.95 (the 0.99 basis reached 614 / 768 columns after one
+             ImageNet-R task in the smoke run) | wp_side input | feat_mode gram |
+             b_init zero (KeepLoRA++ branch) | lr 5e-4 | head_init default
+             (8 variants x 2 datasets = 16 cells; --variants picks a subset)
     all      main, grid, in21k in that order
 
 Every cell logs to logs_main/<dataset>/<config>.log (per-seed 'Experiment:'
@@ -55,7 +56,7 @@ seeds only).
 
 Cost per seed (estimate, one RTX 4090; 10 epochs plus two extra no-backward /
 one-backward passes per task): CIFAR-100 ~0.8 h, ImageNet-R ~0.5 h, CUB ~0.3 h,
-Cars ~0.3 h; main 6 GPU-h, grid 9 GPU-h, in21k 6 GPU-h. About 115 MB of cached
+Cars ~0.3 h; main 6 GPU-h, grid 10 GPU-h, in21k 6 GPU-h. About 115 MB of cached
 state per task (folded attention weights + 48 basis buffers of 768 x 768).
 
 Usage:
@@ -120,6 +121,7 @@ FIRST_SEED_ONLY = ("smoke", "grid")
 VARIANTS = [
     ("epsw0.5", {"keeplora_eps_w": 0.5}),
     ("epsw0", {"keeplora_eps_w": 0.0}),
+    ("epsf0.95", {"keeplora_eps_f": 0.95}),
     ("wpinput", {"keeplora_wp_side": "input"}),
     ("featgram", {"keeplora_feat_mode": "gram"}),
     ("bzero", {"keeplora_b_init": "zero"}),

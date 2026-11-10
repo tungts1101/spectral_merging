@@ -889,11 +889,13 @@ class Learner:
     # extends the protected basis. Task 0 first seeds the basis from the
     # pre-trained weights. Upstream's CLIP text head gives the gradient pass a
     # meaningful classifier from the start; our per-task linear head is fresh,
-    # so keeplora_head_init 'ncm' (default) sets it to the nearest-class-mean
-    # rule (weight = class mean of the current features, bias = -|mean|^2 / 2)
-    # before the pass, as upstream's classifier variant (init_head_class_mean)
-    # does; 'default' keeps the random init. Neither pass touches the training
-    # loader's RNG stream beyond what the extra DataLoader draws from main.g.
+    # so keeplora_head_init 'ncm' (default) sets its weights to the L2-normalised
+    # class means of the current features (bias 0) before the pass -- exactly
+    # upstream's classifier variant (CustomCLIP.init_head_class_mean:
+    # F.normalize(class_means) -> classifier.apply_weight); raw means with the
+    # NCM bias -|mean|^2 / 2 gave logits in the hundreds and a saturated CE in
+    # the smoke run. 'default' keeps the random init. Neither pass touches the
+    # training loader's RNG stream beyond what the extra DataLoader draws from main.g.
 
     def _keeplora_loader(self):
         """Upstream accum_loader: the task's train images (train transform by
@@ -910,9 +912,10 @@ class Learner:
 
     @torch.no_grad()
     def _keeplora_init_head(self, loader):
-        """Nearest-class-mean init of the current head: weight = class mean of
-        the current (merged, adapters off) features, bias = -|mean|^2 / 2.
-        Returns the number of classes the drop_last pass did not see."""
+        """Class-mean init of the current head (upstream init_head_class_mean):
+        weight = L2-normalised class mean of the current (merged, adapters off)
+        features, bias = 0. Returns the number of classes the drop_last pass
+        did not see (their rows stay at the trunc_normal init)."""
         head = self.model.classifier.heads[-1]
         fc = [m for m in head.modules() if isinstance(m, nn.Linear)][-1]
         n_new = self._total_classes - self._known_classes
@@ -926,11 +929,12 @@ class Learner:
             sums.index_add_(0, y, z)
             counts.index_add_(0, y, torch.ones_like(y, dtype=torch.float))
         self.model.backbone.set_active(True)
-        means = sums / counts.clamp_min(1.0).unsqueeze(1)
-        fc.weight.data.copy_(means.to(fc.weight.dtype))
+        seen = counts > 0
+        means = F.normalize(sums / counts.clamp_min(1.0).unsqueeze(1), dim=1)
+        fc.weight.data[seen] = means[seen].to(fc.weight.dtype)
         if fc.bias is not None:
-            fc.bias.data.copy_((-0.5 * means.pow(2).sum(1)).to(fc.bias.dtype))
-        return int((counts == 0).sum().item())
+            fc.bias.data[seen] = 0.0
+        return int((~seen).sum().item())
 
     def _keeplora_gradients(self, loader):
         """Upstream Trainer.estimate_gradient: the mean over the loader's
@@ -3036,7 +3040,7 @@ RECIPE_PRESETS = {
         "keeplora_feat_mode": "code",    # released batch-mean statistic; 'gram' = all tokens
         "keeplora_feat_transform": "train",   # upstream accum_loader: train transform
         "keeplora_b_init": "svd",        # branch v1 (paper Eq. 6); 'zero' = KeepLoRA++ branch
-        "keeplora_head_init": "ncm",     # class-mean head before the gradient pass; 'default'
+        "keeplora_head_init": "ncm",     # normalised class-mean head before the gradient pass; 'default'
         "keeplora_backbone": "vit_base_patch16_224",
         "keeplora_layers": None,         # all 12 blocks
         "keeplora_proj": True,           # also adapt attn.proj ('o')
