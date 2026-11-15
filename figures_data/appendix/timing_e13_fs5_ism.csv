@@ -1,0 +1,253 @@
+dataset,seed,task,stage,seconds,extra
+imagenetr,1993,0,train,10.788912,cached=0
+imagenetr,1993,0,stats,3.700623,classes=20
+imagenetr,1993,0,eval,3.910906,classes=20
+imagenetr,1993,1,train,10.098128,cached=0
+imagenetr,1993,1,merge,0.162998,rule=pspectral
+imagenetr,1993,1,drift_features,1.142221,n=100 d=768
+imagenetr,1993,1,drift_solve,0.002514,n=100 d=768 solver=woodbury
+imagenetr,1993,1,drift,1.148861,
+imagenetr,1993,1,transport,0.136769,K=20 mode=full cov_mode=class
+imagenetr,1993,1,stats,4.061246,classes=20
+imagenetr,1993,1,align,33.354293,classes=40 epochs=10
+imagenetr,1993,1,eval,5.805754,classes=40
+imagenetr,1993,2,train,10.706316,cached=0
+imagenetr,1993,2,merge,0.132147,rule=pspectral
+imagenetr,1993,2,drift_features,1.156605,n=100 d=768
+imagenetr,1993,2,drift_solve,0.001780,n=100 d=768 solver=woodbury
+imagenetr,1993,2,drift,1.161959,
+imagenetr,1993,2,transport,0.267968,K=40 mode=full cov_mode=class
+imagenetr,1993,2,stats,4.541167,classes=20
+imagenetr,1993,2,align,33.067682,classes=60 epochs=10
+imagenetr,1993,2,eval,6.895931,classes=60
+imagenetr,1993,3,train,11.049409,cached=0
+imagenetr,1993,3,merge,0.133055,rule=pspectral
+imagenetr,1993,3,drift_features,1.186590,n=100 d=768
+imagenetr,1993,3,drift_solve,0.001935,n=100 d=768 solver=woodbury
+imagenetr,1993,3,drift,1.192324,
+imagenetr,1993,3,transport,0.359524,K=60 mode=full cov_mode=class
+imagenetr,1993,3,stats,4.681376,classes=20
+imagenetr,1993,3,align,33.939795,classes=80 epochs=10
+imagenetr,1993,3,eval,8.892945,classes=80
+imagenetr,1993,4,train,10.712147,cached=0
+imagenetr,1993,4,merge,0.133347,rule=pspectral
+imagenetr,1993,4,drift_features,1.295119,n=100 d=768
+imagenetr,1993,4,drift_solve,0.001945,n=100 d=768 solver=woodbury
+imagenetr,1993,4,drift,1.300566,
+imagenetr,1993,4,transport,0.468795,K=80 mode=full cov_mode=class
+imagenetr,1993,4,stats,4.719786,classes=20
+imagenetr,1993,4,align,33.680774,classes=100 epochs=10
+imagenetr,1993,4,eval,9.850224,classes=100
+imagenetr,1993,5,train,13.781860,cached=0
+imagenetr,1993,5,merge,0.130748,rule=pspectral
+imagenetr,1993,5,drift_features,1.651511,n=100 d=768
+imagenetr,1993,5,drift_solve,0.002118,n=100 d=768 solver=woodbury
+imagenetr,1993,5,drift,1.657670,
+imagenetr,1993,5,transport,0.582880,K=100 mode=full cov_mode=class
+imagenetr,1993,5,stats,5.320591,classes=20
+imagenetr,1993,5,align,33.841558,classes=120 epochs=10
+imagenetr,1993,5,eval,11.854201,classes=120
+imagenetr,1993,6,train,10.666797,cached=0
+imagenetr,1993,6,merge,0.136363,rule=pspectral
+imagenetr,1993,6,drift_features,1.173735,n=100 d=768
+imagenetr,1993,6,drift_solve,0.002087,n=100 d=768 solver=woodbury
+imagenetr,1993,6,drift,1.179809,
+imagenetr,1993,6,transport,0.705674,K=120 mode=full cov_mode=class
+imagenetr,1993,6,stats,4.884245,classes=20
+imagenetr,1993,6,align,34.281089,classes=140 epochs=10
+imagenetr,1993,6,eval,12.744343,classes=140
+imagenetr,1993,7,train,11.170978,cached=0
+imagenetr,1993,7,merge,0.132903,rule=pspectral
+imagenetr,1993,7,drift_features,1.202459,n=100 d=768
+imagenetr,1993,7,drift_solve,0.002164,n=100 d=768 solver=woodbury
+imagenetr,1993,7,drift,1.208347,
+imagenetr,1993,7,transport,0.819528,K=140 mode=full cov_mode=class
+imagenetr,1993,7,stats,5.045941,classes=20
+imagenetr,1993,7,align,33.718095,classes=160 epochs=10
+imagenetr,1993,7,eval,14.856320,classes=160
+imagenetr,1993,8,train,10.879542,cached=0
+imagenetr,1993,8,merge,0.133327,rule=pspectral
+imagenetr,1993,8,drift_features,1.204603,n=100 d=768
+imagenetr,1993,8,drift_solve,0.002044,n=100 d=768 solver=woodbury
+imagenetr,1993,8,drift,1.210676,
+imagenetr,1993,8,transport,0.925935,K=160 mode=full cov_mode=class
+imagenetr,1993,8,stats,5.001778,classes=20
+imagenetr,1993,8,align,33.939019,classes=180 epochs=10
+imagenetr,1993,8,eval,16.775146,classes=180
+imagenetr,1993,9,train,10.993324,cached=0
+imagenetr,1993,9,merge,0.132638,rule=pspectral
+imagenetr,1993,9,drift_features,1.229127,n=100 d=768
+imagenetr,1993,9,drift_solve,0.002088,n=100 d=768 solver=woodbury
+imagenetr,1993,9,drift,1.234582,
+imagenetr,1993,9,transport,1.041420,K=180 mode=full cov_mode=class
+imagenetr,1993,9,stats,5.121420,classes=20
+imagenetr,1993,9,align,34.505522,classes=200 epochs=10
+imagenetr,1993,9,eval,17.930188,classes=200
+imagenetr,1994,0,train,11.205143,cached=0
+imagenetr,1994,0,stats,5.046929,classes=20
+imagenetr,1994,0,eval,3.903425,classes=20
+imagenetr,1994,1,train,11.260645,cached=0
+imagenetr,1994,1,merge,0.133824,rule=pspectral
+imagenetr,1994,1,drift_features,1.279901,n=100 d=768
+imagenetr,1994,1,drift_solve,0.001926,n=100 d=768 solver=woodbury
+imagenetr,1994,1,drift,1.285375,
+imagenetr,1994,1,transport,0.125112,K=20 mode=full cov_mode=class
+imagenetr,1994,1,stats,5.157872,classes=20
+imagenetr,1994,1,align,32.819904,classes=40 epochs=10
+imagenetr,1994,1,eval,5.858130,classes=40
+imagenetr,1994,2,train,11.058105,cached=0
+imagenetr,1994,2,merge,0.131947,rule=pspectral
+imagenetr,1994,2,drift_features,1.214149,n=100 d=768
+imagenetr,1994,2,drift_solve,0.002089,n=100 d=768 solver=woodbury
+imagenetr,1994,2,drift,1.220147,
+imagenetr,1994,2,transport,0.225677,K=40 mode=full cov_mode=class
+imagenetr,1994,2,stats,5.173728,classes=20
+imagenetr,1994,2,align,32.984602,classes=60 epochs=10
+imagenetr,1994,2,eval,6.959026,classes=60
+imagenetr,1994,3,train,11.391180,cached=0
+imagenetr,1994,3,merge,0.131979,rule=pspectral
+imagenetr,1994,3,drift_features,1.262372,n=100 d=768
+imagenetr,1994,3,drift_solve,0.001914,n=100 d=768 solver=woodbury
+imagenetr,1994,3,drift,1.267725,
+imagenetr,1994,3,transport,0.307208,K=60 mode=full cov_mode=class
+imagenetr,1994,3,stats,5.321337,classes=20
+imagenetr,1994,3,align,33.233866,classes=80 epochs=10
+imagenetr,1994,3,eval,9.024078,classes=80
+imagenetr,1994,4,train,11.341861,cached=0
+imagenetr,1994,4,merge,0.136214,rule=pspectral
+imagenetr,1994,4,drift_features,1.295520,n=100 d=768
+imagenetr,1994,4,drift_solve,0.002019,n=100 d=768 solver=woodbury
+imagenetr,1994,4,drift,1.301545,
+imagenetr,1994,4,transport,0.409832,K=80 mode=full cov_mode=class
+imagenetr,1994,4,stats,5.493138,classes=20
+imagenetr,1994,4,align,34.116662,classes=100 epochs=10
+imagenetr,1994,4,eval,9.954564,classes=100
+imagenetr,1994,5,train,11.230775,cached=0
+imagenetr,1994,5,merge,0.133703,rule=pspectral
+imagenetr,1994,5,drift_features,1.209417,n=100 d=768
+imagenetr,1994,5,drift_solve,0.002097,n=100 d=768 solver=woodbury
+imagenetr,1994,5,drift,1.215480,
+imagenetr,1994,5,transport,0.538244,K=100 mode=full cov_mode=class
+imagenetr,1994,5,stats,5.426169,classes=20
+imagenetr,1994,5,align,33.928302,classes=120 epochs=10
+imagenetr,1994,5,eval,12.157522,classes=120
+imagenetr,1994,6,train,11.359328,cached=0
+imagenetr,1994,6,merge,0.131563,rule=pspectral
+imagenetr,1994,6,drift_features,1.228496,n=100 d=768
+imagenetr,1994,6,drift_solve,0.002009,n=100 d=768 solver=woodbury
+imagenetr,1994,6,drift,1.234036,
+imagenetr,1994,6,transport,0.645525,K=120 mode=full cov_mode=class
+imagenetr,1994,6,stats,5.559471,classes=20
+imagenetr,1994,6,align,33.694709,classes=140 epochs=10
+imagenetr,1994,6,eval,13.302790,classes=140
+imagenetr,1994,7,train,11.383019,cached=0
+imagenetr,1994,7,merge,0.131119,rule=pspectral
+imagenetr,1994,7,drift_features,1.273831,n=100 d=768
+imagenetr,1994,7,drift_solve,0.001777,n=100 d=768 solver=woodbury
+imagenetr,1994,7,drift,1.278920,
+imagenetr,1994,7,transport,0.677342,K=140 mode=full cov_mode=class
+imagenetr,1994,7,stats,5.645230,classes=20
+imagenetr,1994,7,align,34.045603,classes=160 epochs=10
+imagenetr,1994,7,eval,15.508486,classes=160
+imagenetr,1994,8,train,11.458943,cached=0
+imagenetr,1994,8,merge,0.134263,rule=pspectral
+imagenetr,1994,8,drift_features,1.256560,n=100 d=768
+imagenetr,1994,8,drift_solve,0.002091,n=100 d=768 solver=woodbury
+imagenetr,1994,8,drift,1.262787,
+imagenetr,1994,8,transport,0.813741,K=160 mode=full cov_mode=class
+imagenetr,1994,8,stats,5.745185,classes=20
+imagenetr,1994,8,align,34.055639,classes=180 epochs=10
+imagenetr,1994,8,eval,17.516734,classes=180
+imagenetr,1994,9,train,11.442839,cached=0
+imagenetr,1994,9,merge,0.131152,rule=pspectral
+imagenetr,1994,9,drift_features,1.382428,n=100 d=768
+imagenetr,1994,9,drift_solve,0.002022,n=100 d=768 solver=woodbury
+imagenetr,1994,9,drift,1.388099,
+imagenetr,1994,9,transport,0.917795,K=180 mode=full cov_mode=class
+imagenetr,1994,9,stats,5.854231,classes=20
+imagenetr,1994,9,align,34.509653,classes=200 epochs=10
+imagenetr,1994,9,eval,18.643707,classes=200
+imagenetr,1995,0,train,12.305489,cached=0
+imagenetr,1995,0,stats,5.455022,classes=20
+imagenetr,1995,0,eval,3.888562,classes=20
+imagenetr,1995,1,train,11.503479,cached=0
+imagenetr,1995,1,merge,0.132267,rule=pspectral
+imagenetr,1995,1,drift_features,1.290881,n=100 d=768
+imagenetr,1995,1,drift_solve,0.002007,n=100 d=768 solver=woodbury
+imagenetr,1995,1,drift,1.297081,
+imagenetr,1995,1,transport,0.123925,K=20 mode=full cov_mode=class
+imagenetr,1995,1,stats,5.526835,classes=20
+imagenetr,1995,1,align,33.406843,classes=40 epochs=10
+imagenetr,1995,1,eval,6.206973,classes=40
+imagenetr,1995,2,train,11.426907,cached=0
+imagenetr,1995,2,merge,0.132804,rule=pspectral
+imagenetr,1995,2,drift_features,1.232047,n=100 d=768
+imagenetr,1995,2,drift_solve,0.002214,n=100 d=768 solver=woodbury
+imagenetr,1995,2,drift,1.238147,
+imagenetr,1995,2,transport,0.219871,K=40 mode=full cov_mode=class
+imagenetr,1995,2,stats,5.517832,classes=20
+imagenetr,1995,2,align,33.829388,classes=60 epochs=10
+imagenetr,1995,2,eval,7.359850,classes=60
+imagenetr,1995,3,train,11.692013,cached=0
+imagenetr,1995,3,merge,0.134644,rule=pspectral
+imagenetr,1995,3,drift_features,1.289978,n=100 d=768
+imagenetr,1995,3,drift_solve,0.001953,n=100 d=768 solver=woodbury
+imagenetr,1995,3,drift,1.295376,
+imagenetr,1995,3,transport,0.351359,K=60 mode=full cov_mode=class
+imagenetr,1995,3,stats,5.705679,classes=20
+imagenetr,1995,3,align,33.658335,classes=80 epochs=10
+imagenetr,1995,3,eval,9.521814,classes=80
+imagenetr,1995,4,train,11.793814,cached=0
+imagenetr,1995,4,merge,0.137861,rule=pspectral
+imagenetr,1995,4,drift_features,1.290648,n=100 d=768
+imagenetr,1995,4,drift_solve,0.002037,n=100 d=768 solver=woodbury
+imagenetr,1995,4,drift,1.296248,
+imagenetr,1995,4,transport,0.435815,K=80 mode=full cov_mode=class
+imagenetr,1995,4,stats,5.848235,classes=20
+imagenetr,1995,4,align,34.543129,classes=100 epochs=10
+imagenetr,1995,4,eval,10.284946,classes=100
+imagenetr,1995,5,train,11.642646,cached=0
+imagenetr,1995,5,merge,0.131271,rule=pspectral
+imagenetr,1995,5,drift_features,1.243845,n=100 d=768
+imagenetr,1995,5,drift_solve,0.002110,n=100 d=768 solver=woodbury
+imagenetr,1995,5,drift,1.249829,
+imagenetr,1995,5,transport,0.596401,K=100 mode=full cov_mode=class
+imagenetr,1995,5,stats,5.833441,classes=20
+imagenetr,1995,5,align,34.027355,classes=120 epochs=10
+imagenetr,1995,5,eval,12.166908,classes=120
+imagenetr,1995,6,train,11.232455,cached=0
+imagenetr,1995,6,merge,0.132535,rule=pspectral
+imagenetr,1995,6,drift_features,1.235924,n=100 d=768
+imagenetr,1995,6,drift_solve,0.001979,n=100 d=768 solver=woodbury
+imagenetr,1995,6,drift,1.241423,
+imagenetr,1995,6,transport,0.633988,K=120 mode=full cov_mode=class
+imagenetr,1995,6,stats,5.800790,classes=20
+imagenetr,1995,6,align,34.065706,classes=140 epochs=10
+imagenetr,1995,6,eval,13.147696,classes=140
+imagenetr,1995,7,train,11.322128,cached=0
+imagenetr,1995,7,merge,0.133875,rule=pspectral
+imagenetr,1995,7,drift_features,1.245583,n=100 d=768
+imagenetr,1995,7,drift_solve,0.002069,n=100 d=768 solver=woodbury
+imagenetr,1995,7,drift,1.251655,
+imagenetr,1995,7,transport,0.728776,K=140 mode=full cov_mode=class
+imagenetr,1995,7,stats,5.892895,classes=20
+imagenetr,1995,7,align,34.554787,classes=160 epochs=10
+imagenetr,1995,7,eval,15.010958,classes=160
+imagenetr,1995,8,train,11.409078,cached=0
+imagenetr,1995,8,merge,0.132439,rule=pspectral
+imagenetr,1995,8,drift_features,1.220386,n=100 d=768
+imagenetr,1995,8,drift_solve,0.001951,n=100 d=768 solver=woodbury
+imagenetr,1995,8,drift,1.225942,
+imagenetr,1995,8,transport,0.830833,K=160 mode=full cov_mode=class
+imagenetr,1995,8,stats,5.995522,classes=20
+imagenetr,1995,8,align,34.412235,classes=180 epochs=10
+imagenetr,1995,8,eval,16.776959,classes=180
+imagenetr,1995,9,train,12.415220,cached=0
+imagenetr,1995,9,merge,0.135315,rule=pspectral
+imagenetr,1995,9,drift_features,1.274758,n=100 d=768
+imagenetr,1995,9,drift_solve,0.002196,n=100 d=768 solver=woodbury
+imagenetr,1995,9,drift,1.281008,
+imagenetr,1995,9,transport,0.931263,K=180 mode=full cov_mode=class
+imagenetr,1995,9,stats,6.252284,classes=20
+imagenetr,1995,9,align,34.337963,classes=200 epochs=10
+imagenetr,1995,9,eval,18.142173,classes=200
