@@ -53,6 +53,8 @@ from merge_ops import lora_scale, step_norms, alpha_from_stat
 from driftsolve import (
     GCV_GRID,
     gcv_lambda,
+    ridge_identity_dense,
+    ridge_zero_dense,
     ridge_identity_woodbury,
     ridge_zero_woodbury,
     solve_drift,
@@ -297,6 +299,16 @@ class Model21(nn.Module):
 HYBRID_METHODS = ("sgp_seqft", "nsp_seqft")
 
 
+# (config key, tag letter, Tab. 6 value) of each rule's own knob; see merge_tag.
+MERGE_KNOB_TOKENS = {
+    "avg": ("train_merge_topk", "k", 100), "ties": ("train_merge_topk", "k", 100),
+    "max_abs": ("train_merge_topk", "k", 100), "max": ("train_merge_topk", "k", 100),
+    "min": ("train_merge_topk", "k", 100),
+    "dare": ("merge_dare_q", "q", 0.5), "della": ("merge_della_q", "q", 0.5),
+    "knots": ("merge_knots_topk", "k", 100.0), "breadcrumbs": ("merge_bc_beta", "b", 0.5),
+}
+
+
 def merge_tag(cfg):
     """Tag that names a config's merged checkpoints ({prefix}_merged_{tag}_{t}.pt).
 
@@ -337,10 +349,22 @@ def merge_tag(cfg):
     if method == "opcm":
         return f"opcm_a{cfg.get('merge_opcm_alpha', 0.5)}_{cfg.get('merge_opcm_lam', 'adaptive')}"
     if method == "nufilt":
-        return (f"nufilt_rp{cfg.get('merge_nufilt_rp', 128)}_rv{cfg.get('merge_nufilt_rv', 8)}"
-                f"_rl{cfg.get('merge_nufilt_rl', 64)}"
-                f"_ad{int(bool(cfg.get('merge_nufilt_adapt', False)))}")
-    return f"{method}_c{get('train_merge_coef')}"
+        tag = (f"nufilt_rp{cfg.get('merge_nufilt_rp', 128)}_rv{cfg.get('merge_nufilt_rv', 8)}"
+               f"_rl{cfg.get('merge_nufilt_rl', 64)}"
+               f"_ad{int(bool(cfg.get('merge_nufilt_adapt', False)))}")
+        coef = get("train_merge_coef")
+        if float(coef) != 1.0:                      # E12 damping coefficient (1.0 = the paper)
+            tag += f"_c{coef}"
+        return tag
+    tag = f"{method}_c{get('train_merge_coef')}"
+    # E12 2-D grids: the rule's own knob enters the tag when it is set and leaves
+    # its Tab. 6 value, so cells with one coefficient and two knob values never
+    # share merged files in one directory. Configs without the key keep the
+    # legacy tag.
+    knob = MERGE_KNOB_TOKENS.get(method)
+    if knob is not None and knob[0] in cfg and float(cfg[knob[0]]) != float(knob[2]):
+        tag += f"_{knob[1]}{cfg[knob[0]]}"
+    return tag
 
 
 class Learner:
@@ -689,6 +713,12 @@ class Learner:
         # every Stage-2 call; drift_diag (E9) measures the stored old-class
         # statistics before / after the transport and feeds nothing back.
         diag_on = self._config.get("drift_diag", False)
+        # Rebuttal E9 (buffer arm, default off): the drift map is fitted on a
+        # class-balanced buffer of stored training images instead of the
+        # current task's training set (see _drift_buffer_extend).
+        buffer_n = int(self._config.get("train_drift_buffer_n", 0) or 0)
+        if train_drift and buffer_n > 0:
+            self._drift_buffer_extend(buffer_n)
         if self._cur_task == 0:
             if train_ca or train_drift:
                 t0 = self._tic()
@@ -700,7 +730,8 @@ class Learner:
             if train_ca or train_drift:
                 if train_drift:
                     t0 = self._tic()
-                    W = self.fit_drift_map(train_loader)
+                    W = self.fit_drift_map(self._drift_buffer_loader() if buffer_n > 0
+                                           else train_loader)
                     self._toc(t0, "drift")
                     before = self._diag_snapshot() if diag_on else None
                     self.transport_prototypes(W)
@@ -713,10 +744,16 @@ class Learner:
                 self._toc(t0, "stats", classes=self._total_classes - self._known_classes)
                 if diag_on:
                     self._diag_store_raw()
-                t0 = self._tic()
-                self.align(self.model.classifier)
-                self._toc(t0, "align", classes=self._total_classes,
-                          epochs=self._config.get("train_ca_epochs", 10))
+                if self._config.get("train_ca_cov_mode", "class") == "mean":
+                    # Rebuttal E5 'mean': no sampling stage; the test pass classifies
+                    # by cosine to the transported class means (_proto_head / eval).
+                    logging.info(f"[Alignment] cov_mode=mean: prototype head from the "
+                                 f"{self._total_classes} class means, no alignment sampling")
+                else:
+                    t0 = self._tic()
+                    self.align(self.model.classifier)
+                    self._toc(t0, "align", classes=self._total_classes,
+                              epochs=self._config.get("train_ca_epochs", 10))
 
     # ------------------------------------------------------------------
     # Merge-family plumbing
@@ -994,8 +1031,10 @@ class Learner:
         rows = bb.init_from_gradients(grads, b_init)
         cols = [r[2] for r in rows]
         leak = max(r[3] for r in rows)
+        keff = [r[4] for r in rows]
         logging.info(f"[KeepLoRA] Task {self._cur_task}: A/B designed for {len(rows)} slices from {n} batches "
-                     f"| basis cols min {min(cols)} max {max(cols)} | max|U^T A| {leak:.3e} | B init {b_init}")
+                     f"| basis cols min {min(cols)} max {max(cols)} | max|U^T A| {leak:.3e} | B init {b_init} "
+                     f"| rank eff min {min(keff)} max {max(keff)}")
 
     def _keeplora_after_train(self):
         """Hook 2 (train, after the fold and before the state save): feature
@@ -1494,10 +1533,16 @@ class Learner:
                 hi[a:b + 1] = b
             lo, hi = lo.cuda(), hi.cuda()
 
+        proto = self._proto_head()
+        if proto:
+            protos = F.normalize(self._protos[: self._total_classes].cuda(), dim=1)
         with torch.no_grad():
             for _, (_, _, x, y) in enumerate(loader):
                 x, y = x.cuda(), y.cuda()
-                logits = self.model(x)
+                if proto:
+                    logits = F.normalize(self.model.get_features(x), dim=1) @ protos.t()
+                else:
+                    logits = self.model(x)
                 y_pred.append(logits.argmax(dim=1).cpu().numpy())
                 y_true.append(y.cpu().numpy())
                 if til:
@@ -1534,7 +1579,59 @@ class Learner:
             acc_total, grouped = accuracy(y_pred.T, y_true, self._class_increments)
         return acc_total, [float(a) for a in grouped]
 
+    def _proto_head(self):
+        """True when the test pass classifies by cosine to stored prototypes:
+        eval_head == 'proto_cos' (rebuttal E12 proxy, prototypes rebuilt from the
+        deployed backbone) or train_ca_cov_mode == 'mean' (rebuttal E5, the
+        transported class means are the prototypes). Default off."""
+        return (self._config.get("eval_head", "model") == "proto_cos"
+                or self._config.get("train_ca_cov_mode", "class") == "mean")
+
+    def _proto_update(self):
+        """RanPAC-style prototypes for the classes of the current task: one pass
+        over their training images (test transform) through the deployed
+        backbone, class means of get_features, stored once and never moved
+        (no drift transport, no alignment).  One DataLoader for the whole task
+        (compute_multivariate_normal opens one per class, which dominates its
+        time); private generator, so the module stream g is untouched.  Logs
+        '[ProtoEval] task t: prototypes for classes a-b from n images in s s'."""
+        t0 = time.time()
+        lo, hi = self._known_classes, self._total_classes
+        d = self.model.feature_dim
+        protos = torch.zeros((hi, d))
+        if getattr(self, "_protos", None) is not None:
+            protos[:lo] = self._protos[:lo]
+        sums = torch.zeros((hi - lo, d), dtype=torch.float64)
+        counts = torch.zeros(hi - lo, dtype=torch.float64)
+        dataset = self.data_manager.get_dataset(np.arange(lo, hi), source="train", mode="test")
+        loader = DataLoader(dataset, batch_size=256, shuffle=False,
+                            num_workers=int(self._config.get("eval_proto_workers", 8)),
+                            worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(0))
+        self.model.eval()
+        n = 0
+        with torch.no_grad():
+            for _, (_, _, x, y) in enumerate(loader):
+                f = self.model.get_features(x.cuda()).double().cpu()
+                y = (y - lo).long()
+                sums.index_add_(0, y, f)
+                counts.index_add_(0, y, torch.ones_like(y, dtype=torch.float64))
+                n += int(y.numel())
+        if (counts == 0).any():
+            logging.warning(f"[ProtoEval] {int((counts == 0).sum())} class(es) without train samples: zero prototype")
+        protos[lo:hi] = (sums / counts.clamp_min(1.0).unsqueeze(1)).float()
+        self._protos = protos
+        logging.info(f"[ProtoEval] task {self._cur_task}: prototypes for classes {lo}–{hi - 1} "
+                     f"from {n} images in {time.time() - t0:.1f}s")
+
     def eval(self):
+        # Rebuttal E12 proxy: cosine-to-prototype head (RanPAC style) in place of
+        # the model's classifier; prototypes of the new classes are built here,
+        # before the test pass, from the deployed (merged) backbone.
+        if self._config.get("eval_head", "model") == "proto_cos":
+            self._proto_update()
+        elif self._proto_head():
+            # Rebuttal E5 'mean': the stored (drift-transported) class means.
+            self._protos = self._class_means[: self._total_classes].detach().clone()
         # Test pass: module generator g, batch 256 (the unchanged default path).
         # eval_til (default False) additionally keeps the task-masked argmax.
         y_pred, y_true, y_pred_til = self._predict(
@@ -1626,7 +1723,7 @@ class Learner:
             raise ValueError(
                 f"unknown train_ca_cov_mode {cov_mode!r}; expected one of {COV_MODES}")
         cov_rank = int(self._config.get("train_ca_cov_rank", 64))
-        cheap = cov_mode in ("diag", "lowrank", "shared")
+        cheap = cov_mode in ("diag", "lowrank", "shared", "mean")
 
         if not hasattr(self, "_class_means") or not hasattr(self, "_class_covs"):
             self._class_means = torch.zeros((total_class, feature_dim))
@@ -1705,6 +1802,8 @@ class Learner:
             elif cov_mode == "shared":
                 self._shared_scatter += cov_scatter(feats)
                 self._shared_n += max(0, n_feats - 1)    # a duplicated single sample adds no dof
+            elif cov_mode == "mean":
+                pass                                      # rebuttal E5: the class mean alone
             else:
                 cov = torch.cov(feats.T)
                 gamma = self._config.get("train_ca_cov_shrinkage", 0.0)
@@ -1738,6 +1837,48 @@ class Learner:
     # ------------------------------------------------------------------
     # Stage 2: drift compensation (exp19; prev extractor is recipe-aware)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Rebuttal E9, buffer arm (train_drift_buffer_n > 0; default 0 = off)
+    # ------------------------------------------------------------------
+
+    def _drift_buffer_extend(self, n_per_class):
+        """Store `n_per_class` training images of every class of the current
+        task (same count for every class seen so far, the current task included;
+        a class with fewer images contributes all of them). The draw uses a
+        private RandomState seeded by train_drift_buffer_seed (default: the run
+        seed), so the module stream and the data order are untouched. Logs one
+        '[DriftBuffer]' line per task."""
+        if not hasattr(self, "_drift_buffer"):
+            self._drift_buffer = {"data": [], "targets": [], "classes": 0}
+            self._drift_buffer_rs = np.random.RandomState(
+                int(self._config.get("train_drift_buffer_seed", self._config.get("seed", 0))))
+        buf = self._drift_buffer
+        added = 0
+        for cls_idx in range(buf["classes"], self._total_classes):
+            data, targets, _ = self.data_manager.get_dataset(
+                np.arange(cls_idx, cls_idx + 1), source="train", mode="test", ret_data=True)
+            if len(targets) == 0:
+                continue
+            take = min(int(n_per_class), len(targets))
+            sel = np.sort(self._drift_buffer_rs.choice(len(targets), take, replace=False))
+            buf["data"].append(data[sel])
+            buf["targets"].append(targets[sel])
+            added += take
+        buf["classes"] = self._total_classes
+        n_total = int(sum(len(t) for t in buf["targets"]))
+        logging.info(f"[DriftBuffer] task {self._cur_task}: {n_per_class} per class, "
+                     f"{buf['classes']} classes, {n_total} images stored (+{added})")
+
+    def _drift_buffer_loader(self):
+        """DataLoader over the whole buffer (test transform, fixed order), the
+        paired-feature source of fit_drift_map in the buffer arm."""
+        buf = self._drift_buffer
+        data = np.concatenate(buf["data"])
+        targets = np.concatenate(buf["targets"])
+        ds = self.data_manager.get_dataset([], source="train", mode="test", appendent=(data, targets))
+        return DataLoader(ds, batch_size=64, shuffle=False, num_workers=4,
+                          worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(0))
 
     def fit_drift_map(self, train_loader):
         """Closed-form ridge drift map W (d, d) mapping the previous feature
@@ -1775,6 +1916,33 @@ class Learner:
             lam, scores = gcv_lambda(F_old, F_new, grid, ridge=ridge_mode)
             logging.info(
                 f"[Drift] lambda_rule=gcv chosen lambda={lam} | gcv "
+                + " ".join(f"{v:g}:{scores[v]:.6g}" for v in grid)
+            )
+        elif lambda_rule == "val":
+            # Rebuttal E7: lambda chosen on a held-out split of the current task's
+            # paired features (RanPAC-style validation selection): the ridge is
+            # fitted on a random (1 - train_drift_val_frac) share of the pairs for
+            # every value of train_drift_lambda_grid, scored by the mean squared
+            # error of the mapped held-out features, and refitted on all pairs
+            # with the chosen value. Private RandomState; no old data.
+            grid = [float(v) for v in self._config.get("train_drift_lambda_grid",
+                                                        list(GCV_GRID) + [3000.0, 10000.0])]
+            frac = float(self._config.get("train_drift_val_frac", 0.2))
+            n_all = F_old.size(0)
+            rs = np.random.RandomState(int(self._config.get("seed", 0)) + 17 * (self._cur_task + 1))
+            perm = torch.from_numpy(rs.permutation(n_all))
+            n_val = max(1, int(round(frac * n_all)))
+            va, tr = perm[:n_val], perm[n_val:]
+            scores = {}
+            for v in grid:
+                if ridge_mode == "identity":
+                    W_tr = ridge_identity_dense(F_old[tr], F_new[tr], v)
+                else:
+                    W_tr = ridge_zero_dense(F_old[tr], F_new[tr], v)
+                scores[v] = ((F_old[va] @ W_tr.T - F_new[va]) ** 2).mean().item()
+            lam = min(grid, key=lambda v: scores[v])
+            logging.info(
+                f"[Drift] lambda_rule=val chosen lambda={lam} (held-out {n_val}/{n_all} pairs) | mse "
                 + " ".join(f"{v:g}:{scores[v]:.6g}" for v in grid)
             )
         elif lambda_rule not in (None, "fixed"):
@@ -1878,7 +2046,8 @@ class Learner:
             p.requires_grad = True
         logging.info(f"[Alignment] Trainable: {count_parameters(classifier, trainable=True):,}")
 
-        optimizer = optim.SGD(classifier.parameters(), lr=1e-2, momentum=0.9, weight_decay=1e-4)
+        optimizer = optim.SGD(classifier.parameters(), lr=float(self._config.get("train_ca_lr", 1e-2)),
+                              momentum=0.9, weight_decay=1e-4)
 
         cov_mode = self._config.get("train_ca_cov_mode", "class")
         dists = []

@@ -1333,7 +1333,8 @@ class KeepLoRAViT(BaseAdapterViT):
         A = U_r, B = S_r V_r^T (``b_init='svd'``, branch v1) or B = 0
         (``'zero'``, the KeepLoRA++ branch); with 'svd' the weight is then
         shifted by -scaling (A B)^T so the forward pass starts unchanged.
-        Returns [(name, slice, cols, leak = max|U^T A|)]."""
+        Returns [(name, slice, cols, leak = max|U^T A|, k_eff)] where k_eff is
+        the number of non-zero columns of A (= min(r, residual dimension))."""
         if b_init not in ("svd", "zero"):
             raise ValueError(f"keeplora_b_init must be 'svd' or 'zero', got {b_init!r}")
         rows = []
@@ -1344,7 +1345,8 @@ class KeepLoRAViT(BaseAdapterViT):
                 M = mod.get_basis(s)
                 A, B = keeplora_gradient_init(G, M, mod.r)
                 mod.set_init(s, A, B if b_init == "svd" else None)
-                rows.append((name, s, 0 if M is None else int(M.shape[1]), keeplora_basis_leakage(A, M)))
+                rows.append((name, s, 0 if M is None else int(M.shape[1]), keeplora_basis_leakage(A, M),
+                             int(np.count_nonzero(np.abs(A).sum(axis=0) > 0))))
             if b_init == "svd":
                 mod.subtract_init()
         return rows

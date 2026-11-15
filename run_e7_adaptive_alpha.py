@@ -66,6 +66,8 @@ CALIB_DS = "imagenetr"
 CALIB_NAME = "e7_calib_featshift"
 GCV_NAME = "e7_lambda_gcv"
 FIXED_NAME = "e7_fixed"
+LAMBDA_SUFFIX = {"fixed": "", "gcv": "_lgcv", "val": "_lval"}   # --lambda-rule on the --run cells
+RANPAC_GRID = [10.0 ** k for k in range(-8, 9)]   # lambda grid of the val rule (RanPAC)
 ALPHA_MIN, ALPHA_MAX = 0.05, 1.0
 DEFAULT_STAT = "eff"
 CALIB_JSON = os.path.join("figures_data", "e7_calibration.json")
@@ -231,12 +233,19 @@ def build_cells(args, params):
             for rule in args.rules:
                 values = [params[rule]] + [round_param(params[rule] * f) for f in args.param_scale]
                 for v in values:
-                    name = cell_name(rule, v)
+                    name = cell_name(rule, v) + LAMBDA_SUFFIX[args.lambda_rule]
                     if name in cells[ds]:
                         continue
                     cells[ds][name] = rc.cfg(
                         ds, merge_alpha_rule=rule, merge_alpha_param=float(v),
                         merge_alpha_stat=stat, merge_alpha_min=ALPHA_MIN, merge_log_stats=True)
+                    if args.lambda_rule != "fixed":
+                        # lambda chosen per task without the tuned value: 'gcv' (closed
+                        # form) or 'val' (held-out 20 % of the task's pairs, RanPAC-style)
+                        cells[ds][name]["train_drift_lambda_rule"] = args.lambda_rule
+                    if args.lambda_rule == "val":
+                        # RanPAC's grid (user 2026-11-15): powers of ten from 1e-8 to 1e8
+                        cells[ds][name]["train_drift_lambda_grid"] = RANPAC_GRID
     if args.lambda_gcv:
         for ds in args.datasets:
             cells[ds][GCV_NAME] = rc.cfg(ds, train_drift_lambda_rule="gcv", merge_log_stats=True)
@@ -363,6 +372,10 @@ def build_parser():
     ap.add_argument("--calibrate", action="store_true", help="calibrate tau / kappa on ImageNet-R")
     ap.add_argument("--run", action="store_true", help="run the adaptive rules (default mode)")
     ap.add_argument("--lambda-gcv", action="store_true", help="run train_drift_lambda_rule='gcv'")
+    ap.add_argument("--lambda-rule", choices=("fixed", "gcv", "val"), default="fixed",
+                    help="lambda of the --run cells: the tuned value (fixed, default), closed-form GCV, "
+                         "or selection on a held-out 20 %% split of the current task's pairs (val); "
+                         "gcv / val suffix the cell names with _lgcv / _lval")
     ap.add_argument("--rules", nargs="+", choices=RULES, default=list(RULES))
     ap.add_argument("--stat", choices=("eff", "A"), default=DEFAULT_STAT,
                     help="merge_alpha_stat of the specnorm rule (default eff)")

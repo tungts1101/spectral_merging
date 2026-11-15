@@ -60,9 +60,10 @@ MODES = OrderedDict([
     ("cov_lowrank_k16", {"train_ca_cov_mode": "lowrank", "train_ca_cov_rank": 16}),
     ("cov_lowrank_k64", {"train_ca_cov_mode": "lowrank", "train_ca_cov_rank": 64}),
     ("cov_shared", {"train_ca_cov_mode": "shared"}),
+    ("cov_mean", {"train_ca_cov_mode": "mean"}),       # class mean alone, prototype head (PILOT SimpleCIL)
 ])
 # train_ca_cov_mode -> memory_table mode name
-MT_MODE = {"class": "full", "diag": "diag", "lowrank": "lowrank", "shared": "shared"}
+MT_MODE = {"class": "full", "diag": "diag", "lowrank": "lowrank", "shared": "shared", "mean": "mean"}
 
 
 def job_name(ds):
@@ -111,7 +112,7 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     rc.add_common_args(ap)
     ap.add_argument("--modes", nargs="+", choices=list(MODES), default=list(MODES),
-                    help="cells to run (default: all five)")
+                    help="cells to run (default: all six)")
     ap.add_argument("--timing", nargs="?", const="all", default="reference", choices=TIMING_CHOICES,
                     help="cells with stage_timing=True and a timing_<cell>.csv next to the log (E3): "
                          "'reference' (default) = the cov_class cell, 'all' (a bare --timing), 'none'")

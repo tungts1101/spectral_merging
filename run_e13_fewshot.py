@@ -73,12 +73,13 @@ import time
 from collections import OrderedDict
 
 import rebuttal_common as rc   # torch-free: posture, launcher, resume rule
+import run_long                # side_csv_path for the stage timers (E3)
 
 E13_DATASETS = ("cifar224", "imagenetr")
 KS = (5, 20)
-ROWS = ("ism", "nomerge", "avg", "e2lora", "sgplora")
+ROWS = ("ism", "nomerge", "avg", "e2lora", "sgplora", "lca")
 CACHED_ROWS = ("ism", "nomerge", "avg")        # one seqft chain per (dataset, K)
-BASELINE_ROWS = ("e2lora", "sgplora")          # merge-family recipes, own chains
+BASELINE_ROWS = ("e2lora", "sgplora", "lca")   # own chains (merge-family recipes; LCA = seqft + TIES)
 CKPT_DIR = rc.isolated_ckpt_path("e13")        # checkpoints_main/rebuttal/e13
 
 # E2-LoRA backbone pinned to ours (RESULTS.md section 2); the preset default
@@ -108,11 +109,15 @@ def shots_token(k):
     return "full" if k is None else f"fs{int(k)}"
 
 
-def cell_name(k, row):
+def cell_name(k, row, solver="woodbury"):
+    """'e13_fs5_ism'; the dense-solver variant of a few-shot ISM cell is 'e13_fs5_ism_dense'."""
+    if row in CACHED_ROWS and k is not None and solver == "dense":
+        return f"e13_{shots_token(k)}_{row}_dense"
     return f"e13_{shots_token(k)}_{row}"
 
 
-def build_cell(ds, k, row, ckpt_dir=CKPT_DIR, eval_til=True, sgp_cache=False):
+def build_cell(ds, k, row, ckpt_dir=CKPT_DIR, eval_til=True, sgp_cache=False,
+               solver="woodbury", timing=False):
     """Experiment config of one row (merged over BASE_CONFIG and the recipe
     preset by main.run_single_experiment)."""
     common = {"checkpoint_dir": ckpt_dir}
@@ -122,6 +127,15 @@ def build_cell(ds, k, row, ckpt_dir=CKPT_DIR, eval_til=True, sgp_cache=False):
         common["eval_til"] = True             # '[Evaluation-til]' line, zero cost
     if row in CACHED_ROWS:
         over = dict(common, train_prefix=f"{rc.prefix(ds)}_{shots_token(k)}")
+        if k is not None:
+            # n = K x classes per task < d = 768 for every K here: the push-through
+            # (Woodbury) form of the same ridge by default (same map); --solver dense
+            # adds the paired dense cell, and --timing the per-stage timers (E3).
+            over["train_drift_solver"] = solver
+            if timing:
+                name = cell_name(k, row, solver)
+                over["stage_timing"] = True
+                over["stage_timing_csv"] = run_long.side_csv_path(ds, f"timing_{name}", None, False)
         if row == "nomerge":
             over["train_merge"] = "none"
         elif row == "avg":
@@ -137,6 +151,28 @@ def build_cell(ds, k, row, ckpt_dir=CKPT_DIR, eval_til=True, sgp_cache=False):
                     train_ca=True, train_ca_impl="e2",   # their native classifier stage
                     train_drift=False,
                     e2_merge=False)                # plain E2-LoRA, no merged-A
+    if row == "lca":
+        # LCA under our protocol: the Table 3 recipe (Drive backup run_lca_cil.py):
+        # sequential LoRA r = 64 on qkv, incremental TIES merge (coef 1, top-k 100),
+        # LCA alignment with 512 samples per class, lr 5e-3, robust weight 0.1,
+        # no drift map; our backbone (BASE_CONFIG).
+        return dict(common,
+                    train_method="seqft",
+                    model_lora_r=64, model_lora_alpha=128, model_lora_dropout=0.0,
+                    model_lora_target_modules=["qkv"],
+                    model_classifier=["mlp"],
+                    train_epochs=10, train_base_lr=1e-2, train_weight_decay=5e-4,
+                    train_batch_size=64,
+                    train_merge="ties", train_merge_incremental=True,
+                    train_merge_coef=1.0, train_merge_topk=100,
+                    train_ca=True, train_ca_sampling="full",
+                    train_ca_epochs=10, train_ca_lr=5e-3,
+                    train_ca_samples_per_cls=512, train_ca_batch_size=128,
+                    train_ca_robust_weight=0.1, train_ca_cov_shrinkage=0.0,
+                    train_drift=False,
+                    train_prefix=f"e13_{shots_token(k)}_lca",
+                    cache_backbone=True, reset_train=False,
+                    reset_merge=True, cleanup_merged=True)
     if row == "sgplora":
         posture = rc.cfg(ds)                       # Stage-2 source: the ISM posture
         c = dict(common,
@@ -159,7 +195,8 @@ def build_cells(datasets, ks, rows, full_ref=False, **kw):
     for ds in datasets:
         for k in ks:
             for row in rows:
-                cells.append((ds, cell_name(k, row), build_cell(ds, k, row, **kw)))
+                cells.append((ds, cell_name(k, row, kw.get("solver", "woodbury")),
+                              build_cell(ds, k, row, **kw)))
         if full_ref:
             for row in rows:
                 if row in BASELINE_ROWS:
@@ -271,6 +308,11 @@ def main(argv=None):
                     help="cache the SGP-LoRA states and covariance EMAs (~0.5 GB per task)")
     ap.add_argument("--ckpt-dir", default=CKPT_DIR,
                     help=f"fresh checkpoint directory of this job (default {CKPT_DIR})")
+    ap.add_argument("--solver", choices=("woodbury", "dense"), default="woodbury",
+                    help="drift solve of the few-shot ISM cells (default woodbury, n < d); "
+                         "dense adds the suffix _dense to those cells (E3 comparison)")
+    ap.add_argument("--timing", action="store_true",
+                    help="stage_timing=True on the few-shot ISM cells with a timing_<cell>.csv (E3)")
     ap.add_argument("--diff-against", metavar="LOG", default=None,
                     help="compare the baseline rows with a server log's Configuration dump and exit")
     args = rc.apply_common_args(ap.parse_args(argv))
@@ -284,6 +326,7 @@ def main(argv=None):
 
     cells = build_cells(args.datasets, args.k, args.rows, full_ref=args.full_ref,
                         ckpt_dir=args.ckpt_dir, eval_til=not args.no_eval_til,
+                        solver=args.solver, timing=args.timing,
                         sgp_cache=args.sgp_cache)
     if args.diff_against:
         return diff_against(args.diff_against, cells)

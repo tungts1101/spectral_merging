@@ -26,7 +26,7 @@ from torch.distributions import (
 )
 
 #: Covariance modes accepted by train_ca_cov_mode after E5.
-COV_MODES = ("class", "shared_corr", "diag", "lowrank", "shared")
+COV_MODES = ("class", "shared_corr", "diag", "lowrank", "shared", "mean")
 
 #: Jitter added to every covariance before it is stored or sampled (main.py).
 JITTER = 1e-4
@@ -224,6 +224,8 @@ def storage_floats(mode, d, C, rank=None):
         return C * d * (int(rank) + 2)
     if mode == "shared":
         return C * d + d * d
+    if mode == "mean":
+        return C * d                       # rebuttal E5: the class mean alone
     raise ValueError(f"unknown storage mode {mode!r}")
 
 

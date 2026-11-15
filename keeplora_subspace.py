@@ -174,7 +174,14 @@ def gradient_init(grad, basis, rank):
     left singular vectors of G_hat (in, rank); B = S_r V_r^T (rank, out).  The
     LoRA increment of the released module is x A B * scaling, and
     ``KeepLoRALinear`` subtracts scaling * (A B)^T from the weight once at
-    initialisation so the network starts unchanged (Alg. 1).  Returns (A, B)."""
+    initialisation so the network starts unchanged (Alg. 1).  Returns (A, B).
+
+    The projected gradient has rank at most d_in - cols(basis).  Beyond that the
+    trailing singular vectors of the SVD are an arbitrary orthonormal completion
+    that can fall inside the protected subspace, so the design stops at the
+    residual dimension k = min(rank, d_in - cols(basis)): columns k.. of A and
+    rows k.. of B are zero (nothing left to learn in them; their gradient is
+    zero, so they stay zero).  With k == rank this is the released init."""
     G = np.asarray(grad, dtype=np.float64)
     if G.ndim != 2:
         raise ValueError(f"grad must be 2-D, got shape {G.shape}")
@@ -186,9 +193,13 @@ def gradient_init(grad, basis, rank):
         if M.shape[0] != G.shape[0]:
             raise ValueError(f"basis has {M.shape[0]} rows, the gradient {G.shape[0]} (paper layout (in, out))")
         G = G - M @ (M.T @ G)
+    k = rank if M is None else max(0, min(rank, G.shape[0] - int(M.shape[1])))
     U, S, Vh = np.linalg.svd(G, full_matrices=False)
-    A = np.ascontiguousarray(U[:, :rank])
-    B = np.ascontiguousarray(S[:rank, None] * Vh[:rank])
+    A = np.zeros((G.shape[0], rank))
+    B = np.zeros((rank, G.shape[1]))
+    if k:
+        A[:, :k] = U[:, :k]
+        B[:k] = S[:k, None] * Vh[:k]
     return A, B
 
 

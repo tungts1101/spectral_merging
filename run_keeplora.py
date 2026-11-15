@@ -65,6 +65,7 @@ Usage:
     python run_keeplora.py --stage smoke                 # run twice (cache round-trip)
     python run_keeplora.py                               # main stage
     python run_keeplora.py --ds imagenetr --seeds 1993
+    python run_keeplora.py --ds imagenetr --rank 64        # capacity-matched cell (ISM uses r = 64)
     python run_keeplora.py --stage grid --variants epsw0 featgram
     python run_keeplora.py --stage in21k
 """
@@ -171,6 +172,8 @@ def build_cfg(ds, bb, smoke=False, **over):
 def variant_suffix(over):
     """Config-name suffix of the triage overrides (new name = new log file)."""
     s = ""
+    if "lora_r" in over:
+        s += f"_r{over['lora_r']}"
     if "train_batch_size" in over:
         s += f"_bs{over['train_batch_size']}"
     return s
@@ -355,6 +358,10 @@ def main(argv=None):
                     help="override the stage's backbone (matched = ours, in21k = IN21k-only)")
     ap.add_argument("--variants", nargs="+", choices=VARIANT_TAGS, default=None,
                     help="grid stage: run only these variants")
+    ap.add_argument("--rank", type=int, default=None,
+                    help="lora_r override (released setting 16; 64 = ISM's rank, the capacity-matched "
+                         "cell; own name '<cell>_r<rank>' and prefix). A is capped at the residual "
+                         "dimension of the protected subspace; the log's 'rank eff' field shows it")
     ap.add_argument("--batch-size", type=int, default=None,
                     help="train_batch_size override (OOM fallback 32; own name and prefix)")
     ap.add_argument("--dry-run", action="store_true",
@@ -371,6 +378,8 @@ def main(argv=None):
     stages = list(ALL_ORDER) if args.stage == "all" else [args.stage]
 
     over = {}
+    if args.rank is not None:
+        over["lora_r"] = args.rank
     if args.batch_size is not None:
         over["train_batch_size"] = args.batch_size
 

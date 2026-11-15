@@ -53,12 +53,13 @@ EXPECTED = {
     # 0.3; alpha 1.0 is the identity sanity cell the driver adds to the plan's 14 (documented there).
     "run_e10_step_control.py": (["--part", "merge"], 15),
     "run_e11_rank_sweep.py": ([], 4),                       # r in {8,16,128} + r = 64 reference (strategy 2026-11-10)
-    "run_e12_merge_grid.py": ([], 168),                     # 7 rules x 6 coefficients x 4 datasets
-    "run_e13_fewshot.py": ([], 20),                         # 2 datasets x K {5,20} x 5 rows
+    "run_e12_merge_grid.py": ([], 148),                     # budget 4: (9 methods x 4 + Model Stock) x 4 datasets
+    "run_e13_fewshot.py": ([], 24),                         # 2 datasets x K {5,20} x 6 rows (lca added 2026-11-14)
+    "run_e9_buffer.py": ([], 3),                            # ImageNet-R x buffer N {5,10,20}
     "run_e14_valsplit.py": ([], None),                      # headline + grid per dataset
     "run_e15_opcm_nufilt.py": (["--stage", "1"], 4),        # stage-1 NUFILT grid on ImageNet-R (opcm opt-in)
     "run_long.py": (["--ds", "cifar224", "--split", "t50"], 1),  # the plan's own example, no --grid
-    "run_covmode.py": ([], 20),                             # 5 modes x 4 datasets
+    "run_covmode.py": ([], 24),                             # 6 modes x 4 datasets (cov_mean added 2026-11-14)
     "run_driftdiag.py": (["--splits", "t10"], 4),           # 4 datasets x 10-task split
     "run_inflora.py": ([], None),                           # stage-dependent
     "run_keeplora.py": ([], 4),                             # main stage: one cell per dataset (3 seeds each)

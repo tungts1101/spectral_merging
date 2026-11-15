@@ -314,9 +314,15 @@ def test_sota_merge_dispatch_and_methods():
     a = ms.sota_merge(base, w_prev, w_new, "nufilt", lamb=0.3, nufilt_rp=32,
                       nufilt_rv=4, nufilt_rl=16, nufilt_adapt=True, nufilt_iters=5,
                       nufilt_lr=1e-3, state=st_a)
+    # the dispatcher's lamb is NUFILT's damping coefficient (E12 grid; 1.0 = the paper)
     b = ms.nufilt_pair(base, w_prev, w_new, r_p=32, r_v=4, r_l=16, adapt=True,
-                       iters=5, lr=1e-3, state=st_b)
+                       iters=5, lr=1e-3, coef=0.3, state=st_b)
     assert all(torch.equal(a[k], b[k]) for k in a) and st_a == st_b
+    full = ms.nufilt_pair(base, w_prev, w_new, r_p=32, adapt=False)
+    damp = ms.nufilt_pair(base, w_prev, w_new, r_p=32, adapt=False, coef=0.3)
+    for k in full:
+        expect = w_prev[k].double() + 0.3 * (full[k].double() - w_prev[k].double())
+        assert torch.allclose(damp[k].double(), expect, atol=1e-6, rtol=1e-6), k
     assert st_a["rp_eff_mean"] == 32 and st_a["n_adapted"] == 3
     try:
         ms.sota_merge(base, w_prev, w_new, "bogus")

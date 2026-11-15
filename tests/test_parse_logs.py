@@ -807,8 +807,15 @@ def test_e12_merge_grid():
     rc, text = _run_sub(["e12", "--roots", fx["root"], "--out-dir", out, "--cubes-dir", fx["fig"]])
     assert rc == 0
     cells = _read_csv(os.path.join(out, "e12_merge_grid.csv"))
-    assert len(cells) == 25
-    by = {(r["dataset"], r["rule"], r["coef"]): r for r in cells}
+    # 26 rule cells + the two e12_ism fixtures, which count as ISM grid cells (rule pspectral,
+    # coef = alpha, knob = p) since the budget-4 proxy protocol made ISM one method among the others
+    assert len(cells) == 28
+    ism = {(r["dataset"], r["coef"], r["knob"]) for r in cells if r["rule"] == "pspectral"}
+    assert ism == {("cub", "0.1", "0.9"), ("imagenetr", "0.3", "0.9")}
+    assert "| ISM (ours), alpha x p grid | alpha=0.1, p=0.9:" in text and "| alpha=0.3, p=0.9:" in text
+    by = {(r["dataset"], r["rule"], r["coef"]): r for r in cells if r["config_names"] != "e12_ties_k20_c0.5"}
+    k20 = [r for r in cells if r["config_names"] == "e12_ties_k20_c0.5"]
+    assert len(k20) == 1 and k20[0]["knob"] == "20" and k20[0]["rule"] == "ties" and k20[0]["coef"] == "0.5"
     c = by[("imagenetr", "avg", "0.5")]
     assert c["n_seeds"] == "3" and c["incremental_observed"] == "True" and c["flags"] == ""
     assert abs(float(c["fa"]) - fx["fx"]["e12_imagenetr_avg_c0.5"]["summary"]["faa"]) <= 0.0101
@@ -954,9 +961,14 @@ def test_e15_keeplora():
     assert int(c["basis_cols_last_max"]) == max(last[1]) and c["basis_full_last"] == "0" and c["skipped_batches"] == "0"
     assert int(c["basis_cols_task0_max"]) == ck["seeds"][1993]["design"][0][2]
     assert float(c["leak_max"]) < 1e-5 and "full" not in c["flags"]
+    assert c["rank_eff_min"] == "16" and c["rank_eff_max"] == "16" and "capped" not in c["flags"]
     i = keep["imagenetr"]
     assert i["n_seeds"] == "3" and i["n_failed"] == "0" and i["basis_full_last"] == "2"
+    # the campaign mirror in the fixture root holds both cell logs again: it must not be counted
+    assert os.path.isfile(fx["fx"]["keeplora_campaign"]["path"])
+    assert sum(r["config_name"] == "keeplora_matched_imagenetr" for r in _read_csv(os.path.join(out, "e15_keeplora.csv"))) == 1
     assert "2 slices with a full (d x d) basis" in i["flags"] and int(i["basis_cols_last_max"]) == 768
+    assert i["rank_eff_min"] == "0" and "A rank capped by the residual dimension: min 0 of r = 16" in i["flags"]
     r = pl.parse_file(ck["path"])
     assert sum(x["status"] == "crashed" for x in r) == 1 and all(x["config"]["train_method"] == "keeplora" for x in r)
     okr = next(x for x in r if x["status"] == "ok")

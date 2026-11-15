@@ -78,6 +78,14 @@ TOTAL_CLASSES = {"cifar224": 100, "imageneta": 200, "imagenetr": 200,
 
 # BASE_CONFIG merge keys (main.py:1787-1793) that merged_checkpoint reads when a
 # config does not set them.
+# (config key, tag letter, Tab. 6 value) of each rule's own knob (mirror of main.MERGE_KNOB_TOKENS)
+MERGE_KNOB_TOKENS = {
+    "avg": ("train_merge_topk", "k", 100), "ties": ("train_merge_topk", "k", 100),
+    "max_abs": ("train_merge_topk", "k", 100), "max": ("train_merge_topk", "k", 100),
+    "min": ("train_merge_topk", "k", 100),
+    "dare": ("merge_dare_q", "q", 0.5), "della": ("merge_della_q", "q", 0.5),
+    "knots": ("merge_knots_topk", "k", 100.0), "breadcrumbs": ("merge_bc_beta", "b", 0.5),
+}
 BASE_MERGE_DEFAULTS = {
     "train_merge": "pspectral",
     "spectral_variant": "only_A",
@@ -188,7 +196,10 @@ def merge_tag(config):
     token for merge_update_op != 'trunc' (pspec_only_A_p0.9_clip_a0.3, so the plain
     cell's cleanup glob '*_merged_pspec_only_A_p0.9_a0.3_*.pt' cannot match a clip
     cell's files), `a{rule}{param}` for merge_alpha_rule != 'fixed',
-    `opcm_a{alpha}_{lam}` and `nufilt_rp{rp}_rv{rv}_rl{rl}_ad{0|1}`.  main.merge_tag
+    `opcm_a{alpha}_{lam}` and `nufilt_rp{rp}_rv{rv}_rl{rl}_ad{0|1}` (plus `_c{coef}` when
+    the E12 damping coefficient is not 1.0); for the other rules a knob token
+    (`_k{topk}`, `_q{q}`, `_b{beta}`) when the rule's own knob is set and leaves its
+    Tab. 6 value (MERGE_KNOB_TOKENS).  main.merge_tag
     is the authority; `--check` compares the two when main is importable.
     Values are formatted with the same f-strings as main, so floats must be
     passed as the same Python objects (0.3 -> 'a0.3', 1.0 -> 'p1.0').
@@ -211,9 +222,16 @@ def merge_tag(config):
     if mm == "opcm":
         return f"opcm_a{c.get('merge_opcm_alpha', 0.5)}_{c.get('merge_opcm_lam', 'adaptive')}"
     if mm == "nufilt":
-        return (f"nufilt_rp{c.get('merge_nufilt_rp', 128)}_rv{c.get('merge_nufilt_rv', 8)}"
-                f"_rl{c.get('merge_nufilt_rl', 64)}_ad{int(bool(c.get('merge_nufilt_adapt', False)))}")
-    return f"{mm}_c{c['train_merge_coef']}"
+        tag = (f"nufilt_rp{c.get('merge_nufilt_rp', 128)}_rv{c.get('merge_nufilt_rv', 8)}"
+               f"_rl{c.get('merge_nufilt_rl', 64)}_ad{int(bool(c.get('merge_nufilt_adapt', False)))}")
+        if float(c["train_merge_coef"]) != 1.0:
+            tag += f"_c{c['train_merge_coef']}"
+        return tag
+    tag = f"{mm}_c{c['train_merge_coef']}"
+    knob = MERGE_KNOB_TOKENS.get(mm)
+    if knob is not None and knob[0] in config and float(config[knob[0]]) != float(knob[2]):
+        tag += f"_{knob[1]}{config[knob[0]]}"
+    return tag
 
 
 def chain_stem(seed, ds, train_prefix, model_backbone=MODEL_BACKBONE):

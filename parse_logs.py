@@ -819,7 +819,9 @@ def parse_glob(pattern, capture_tags=None):
 
 
 def load_runs(roots=None, globs=None, capture_tags=None, skip_smoke=False, verbose=True):
-    """Every selected run under the given roots (recursive *.log) and glob patterns."""
+    """Every selected run under the given roots (recursive *.log) and glob patterns.
+    ``*_campaign.log`` files are skipped: a driver writes them as a line-for-line
+    mirror of its cell logs, so parsing them too would count every seed twice."""
     files = []
     for root in roots or ():
         if not os.path.isdir(root):
@@ -838,6 +840,8 @@ def load_runs(roots=None, globs=None, capture_tags=None, skip_smoke=False, verbo
         seen.add(key)
         if skip_smoke and "smoke" in os.path.normpath(path).split(os.sep):
             continue
+        if os.path.basename(path).endswith("_campaign.log"):
+            continue      # driver-level mirror of every cell log (run_keeplora.py); would double count
         runs.extend(parse_file(path, capture_tags=capture_tags))
     return runs
 
@@ -1177,6 +1181,7 @@ CELL_KEYS = ("dataset", "train_method", "train_merge", "spectral_variant", "pspe
 _E2_RULE_KEYS = {"dare": ("merge_dare_q",), "della": ("merge_della_q",),
                  "breadcrumbs": ("merge_bc_beta", "merge_bc_gamma"), "knots": ("merge_knots_topk",),
                  "kspectral": ("train_merge_k",),
+                 "nufilt": ("merge_nufilt_rp", "merge_nufilt_adapt"), "modelstock": (),
                  "avg": ("train_merge_topk", "train_merge_incremental"),
                  "ties": ("train_merge_topk", "train_merge_incremental"),
                  "max_abs": ("train_merge_topk", "train_merge_incremental"),
@@ -1494,7 +1499,7 @@ INFLORA_BACKBONE_RE = re.compile(r"^\[InfLoRA\] backbone (\S+) -> (\S+)")
 # '[KeepLoRA] ...' lines (main._keeplora_before_train / _after_train, run_keeplora.run_cell, backbones factory)
 KEEPLORA_DESIGN_RE = re.compile(
     r"^\[KeepLoRA\] Task (\d+): A/B designed for (\d+) slices from (\d+) batches \| basis cols min (\d+) max (\d+) "
-    r"\| max\|U\^T A\| (" + _NUM + r") \| B init (\w+)")
+    r"\| max\|U\^T A\| (" + _NUM + r") \| B init (\w+)(?: \| rank eff min (\d+) max (\d+))?")
 KEEPLORA_SUBSPACE_RE = re.compile(
     r"^\[KeepLoRA\] subspace task (\d+) eps_f=(" + _NUM + r") mode=(\w+) \| cols min (\d+) max (\d+) mean (" + _NUM
     + r") \| added min (\d+) max (\d+) \| full (\d+)/(\d+)(?: \| skipped batches (\d+))? \| cols (\[[^\]]*\]) \| added (\[[^\]]*\])")
@@ -1680,7 +1685,9 @@ def parse_keeplora_lines(run):
         if m:
             out["design"].append(OrderedDict(task=int(m.group(1)), slices=int(m.group(2)), batches=int(m.group(3)),
                                              cols_min=int(m.group(4)), cols_max=int(m.group(5)),
-                                             leak=float(m.group(6)), b_init=m.group(7)))
+                                             leak=float(m.group(6)), b_init=m.group(7),
+                                             rank_eff_min=int(m.group(8)) if m.group(8) else None,
+                                             rank_eff_max=int(m.group(9)) if m.group(9) else None))
             continue
         m = KEEPLORA_SUBSPACE_RE.match(line)
         if m:
@@ -2922,16 +2929,21 @@ def cmd_e11(argv):
 
 # --- E12: equal tuning budget for the other merge rules ----------------------------------
 E12_CLASSICAL = ("avg", "ties", "max_abs", "max", "min")          # helper.merge rules (incremental chain expected)
-E12_SOTA = ("dare", "della", "knots", "breadcrumbs", "modelstock")
-E12_RULES = E12_CLASSICAL + E12_SOTA
-E12_COLS = ["dataset", "rule", "coef", "config_names", "n_seeds", "n_failed", "fa", "fa_sd", "aa", "aa_sd", "ffm", "ffm_sd",
+E12_SOTA = ("dare", "della", "knots", "breadcrumbs", "modelstock", "nufilt")
+E12_KNOB = {"ties": "train_merge_topk", "dare": "merge_dare_q",
+            "della": "merge_della_q", "knots": "merge_knots_topk", "breadcrumbs": "merge_bc_beta",
+            "nufilt": "merge_nufilt_rp"}
+E12_RULES = E12_CLASSICAL + E12_SOTA + ("pspectral",)   # pspectral = ISM's own alpha x p grid cells
+E12_COEF_NAME = {"pspectral": "alpha", "nufilt": "coef"}     # what 'coef' means per rule (else c)
+E12_COLS = ["dataset", "rule", "coef", "knob", "config_names", "n_seeds", "n_failed", "fa", "fa_sd", "aa", "aa_sd", "ffm", "ffm_sd",
             "old_mean", "new_acc", "first5_mean", "incremental_observed", "extras", "flags"]
 E12_ORDER = ("cifar224", "cub", "imagenetr", "cars")
 
 
 def _rule_label(rule):
     return {"avg": "Task Arithmetic (avg)", "ties": "TIES", "max_abs": "max-abs", "dare": "DARE", "della": "DELLA",
-            "knots": "KnOTS", "breadcrumbs": "Breadcrumbs", "modelstock": "Model Stock"}.get(rule, rule)
+            "knots": "KnOTS", "breadcrumbs": "Breadcrumbs", "modelstock": "Model Stock",
+            "nufilt": "NUFILT", "pspectral": "ISM (ours), alpha x p grid"}.get(rule, rule)
 
 
 # Cells with these keys off their default are not ISM tuning cells (other experiments' arms).
@@ -3009,18 +3021,27 @@ def cmd_e12(argv):
     args = p.parse_args(argv)
     runs = _load_tags(args, capture_tags=())
     grid = [r for r in runs if str(r["config"].get("train_merge")) in E12_RULES
-            and (re.search(args.pattern, str(r["config_name"])) or args.all_rules)]
+            and (re.search(args.pattern, str(r["config_name"]))
+                 or (args.all_rules and r["config"].get("train_merge") != "pspectral"))]
     if not grid:
         print("(no e12 grid runs found; nothing written)")
         return 0
     for r in grid:
         r["_rule"] = str(r["config"].get("train_merge"))
+        if r["_rule"] == "pspectral":      # ISM grid cell: coef = alpha, knob = p
+            r["_coef"] = round(_cfgf(r, "train_merge_alpha", HEADLINE.get(r["dataset"], {}).get("alpha", 0.0)), 6)
+            r["_knob"] = round(_cfgf(r, "pspectral_p", HEADLINE_P), 6)
+            continue
         r["_coef"] = round(_cfgf(r, "train_merge_coef", 1.0), 6)
-    keys = ("dataset", "_rule", "_coef")
+        kk = E12_KNOB.get(r["_rule"])
+        kv = r["config"].get(kk) if kk else None
+        r["_knob"] = None if kv is None else round(float(kv), 6)   # the rule's own knob (E12 2-D grid)
+    keys = ("dataset", "_rule", "_knob", "_coef")
     cells = []
     for c in aggregate(grid, keys, metrics=_CELL_METRICS):
         members = _members(grid, c, keys)
-        row = OrderedDict(dataset=c["dataset"], rule=c["_rule"], coef=c["_coef"], config_names=_names(members))
+        row = OrderedDict(dataset=c["dataset"], rule=c["_rule"], coef=c["_coef"], knob=c["_knob"],
+                          config_names=_names(members))
         row.update(_std_metrics(c))
         row["n_failed"] = c["n_failed"]
         obs = {m["merge_incremental_observed"] for m in members}
@@ -3037,7 +3058,8 @@ def cmd_e12(argv):
             flags.append("SUMMARY mismatch")
         row["flags"] = "; ".join(flags)
         cells.append(row)
-    cells.sort(key=lambda r: (E12_ORDER.index(r["dataset"]) if r["dataset"] in E12_ORDER else 9, r["rule"], r["coef"]))
+    cells.sort(key=lambda r: (E12_ORDER.index(r["dataset"]) if r["dataset"] in E12_ORDER else 9, r["rule"],
+                              -1.0 if r["knob"] is None else r["knob"], r["coef"]))
     os.makedirs(args.out_dir, exist_ok=True)
     path = os.path.join(args.out_dir, "e12_merge_grid.csv")
     write_csv(path, cells, E12_COLS)
@@ -3057,8 +3079,9 @@ def cmd_e12(argv):
         return [c for c in cs if c["n_seeds"] >= 3 and c["n_failed"] == 0] or [c for c in cs if c["n_seeds"]]
 
     # ISM rows: the paired headline cell on the same chain (prefer e12_ism*), budget per dataset.
-    ism = {ds: _reference_cell(runs, ds, prefer=("e12_ism", "e8_", "mc3d_", "e10_trunc", "cov_class", "best_"))
-           for ds in datasets}
+    # the proxy grid (--pattern '^e12p_') pairs with its own ISM headline cell e12p_ism
+    pref = ("e12p_ism",) if "e12p" in args.pattern else ("e12_ism", "e8_", "mc3d_", "e10_trunc", "cov_class", "best_")
+    ism = {ds: _reference_cell(runs, ds, prefer=pref) for ds in datasets}
     budget_ism = {}
     for ds in datasets:
         b = _ism_budget_from_record(rec_path, ds) or _ism_budget_from_cubes(args.cubes_dir, ds)
@@ -3073,13 +3096,20 @@ def cmd_e12(argv):
         for ds in datasets:
             cs = complete([c for c in cells if c["dataset"] == ds and c["rule"] == rule])
             best = max(cs, key=lambda c: c["fa"]) if cs else None
-            ra[ds] = f"c={best['coef']:g}: {fa_aa(best)}" if best else "-"
+            ra[ds] = (f"{E12_COEF_NAME.get(rule, 'c')}={best['coef']:g}"
+                      + (f", {'p' if rule == 'pspectral' else E12_KNOB.get(rule, 'knob')}={best['knob']:g}"
+                         if best.get("knob") is not None else "")
+                      + f": {fa_aa(best)}") if best else "-"
             ra[f"{ds} cells"] = len([c for c in cells if c["dataset"] == ds and c["rule"] == rule])
         sel_cs = complete([c for c in cells if c["dataset"] == args.select_on and c["rule"] == rule])
-        c_sel = max(sel_cs, key=lambda c: c["fa"])["coef"] if sel_cs else None
-        rb["coef (from " + args.select_on + ")"] = f"{c_sel:g}" if c_sel is not None else "-"
+        sel = max(sel_cs, key=lambda c: c["fa"]) if sel_cs else None
+        c_sel, k_sel = (sel["coef"], sel.get("knob")) if sel else (None, None)
+        rb["coef (from " + args.select_on + ")"] = (f"{c_sel:g}" + (f" / {k_sel:g}" if k_sel is not None else "")) \
+            if c_sel is not None else "-"
         for ds in datasets:
-            cell = next((c for c in cells if c["dataset"] == ds and c["rule"] == rule and _close(c["coef"], c_sel)), None) \
+            cell = next((c for c in cells if c["dataset"] == ds and c["rule"] == rule and _close(c["coef"], c_sel)
+                         and ((c.get("knob") is None and k_sel is None)
+                              or (c.get("knob") is not None and k_sel is not None and _close(c["knob"], k_sel)))), None) \
                 if c_sel is not None else None
             rb[ds] = fa_aa(cell) if cell else "-"
         rows_a.append(ra)
@@ -3095,8 +3125,9 @@ def cmd_e12(argv):
         ism_a[f"{ds} cells"] = (f"{b['p0.9_only_A_alpha_cells']} alpha cells at p=0.9 ({b['all_pspectral_cells']} pspectral cells)"
                                 if b else "n/a")
         ism_b[ds] = txt
-    rows_a.append(ism_a)
-    rows_b.append(ism_b)
+    if "pspectral" not in rules or any(ism.values()):
+        rows_a.append(ism_a)
+        rows_b.append(ism_b)
     ta_a = OrderedDict(rule="Task Arithmetic, interpolation form (pspectral p=1), tuned per dataset")
     for ds in datasets:
         t = ta[ds]
@@ -3461,7 +3492,8 @@ E15_KEEPLORA_COLS = ["dataset", "config_name", "backbone", "resolved_backbone", 
                      "feat_mode", "b_init", "head_init", "train_epochs", "train_base_lr", "train_batch_size", "n_seeds",
                      "n_failed", "fa", "fa_sd", "aa", "aa_sd", "ffm", "ffm_sd", "micro_acc", "micro_acc_sd", "avg", "avg_sd",
                      "sweep_fa", "sweep_micro_acc", "trainable_params", "basis_cols_task0_max", "basis_cols_last_max",
-                     "basis_cols_last_mean", "basis_full_last", "leak_max", "skipped_batches", "flags"]
+                     "basis_cols_last_mean", "basis_full_last", "leak_max", "rank_eff_min", "rank_eff_max",
+                     "skipped_batches", "flags"]
 
 
 def e15_setting(cfg):
@@ -3573,6 +3605,8 @@ def cmd_e15(argv):
                 full_last.append(i["subspace"][-1]["full"])
                 skipped += sum(s["skipped"] for s in i["subspace"])
             leaks.extend(d["leak"] for d in i["design"])
+        keff_min = [d["rank_eff_min"] for i in info for d in i["design"] if d.get("rank_eff_min") is not None]
+        keff_max = [d["rank_eff_max"] for i in info for d in i["design"] if d.get("rank_eff_max") is not None]
         params = sorted({m["trainable_params"] for m in members if m["trainable_params"] is not None})
         row = OrderedDict(dataset=c["dataset"], config_name=c["config_name"], backbone=cfg.get("keeplora_backbone"),
                           resolved_backbone=next((i["backbone"][1] for i in info if i["backbone"]), None),
@@ -3593,16 +3627,28 @@ def cmd_e15(argv):
         row["basis_cols_last_mean"] = _mean(last_mean)
         row["basis_full_last"] = max(full_last) if full_last else None
         row["leak_max"] = max(leaks) if leaks else None
+        row["rank_eff_min"] = min(keff_min) if keff_min else None
+        row["rank_eff_max"] = max(keff_max) if keff_max else None
         row["skipped_batches"] = skipped
         flags = []
         if c["n_failed"]:
             flags.append(f"failed seeds {c['failed_seeds']}")
         if row["basis_full_last"]:
             flags.append(f"{row['basis_full_last']} slices with a full (d x d) basis: no residual left to learn in")
-        if row["leak_max"] is not None and row["leak_max"] > 1e-5:
-            flags.append(f"max|U^T A| {row['leak_max']:.2e} > 1e-5")
+        # the basis buffers are float32 (as upstream), so max|U^T A| carries the
+        # round-off of a ~700-column float32 orthonormal basis (1e-7 .. 1e-5, growing
+        # with the basis and with r); a design failure (an SVD completion vector
+        # inside the protected subspace) shows up as 1e-2 .. 1
+        if row["leak_max"] is not None and row["leak_max"] > 1e-4:
+            flags.append(f"max|U^T A| {row['leak_max']:.2e} > 1e-4")
         if skipped:
             flags.append(f"{skipped} feature batches skipped (unequal batch size)")
+        try:
+            r_cfg = int(cfg.get("lora_r")) if cfg.get("lora_r") is not None else None
+        except (TypeError, ValueError):
+            r_cfg = None
+        if row["rank_eff_min"] is not None and r_cfg is not None and row["rank_eff_min"] < r_cfg:
+            flags.append(f"A rank capped by the residual dimension: min {row['rank_eff_min']} of r = {r_cfg}")
         if row["sweep_fa"] is not None and row["fa"] is not None and abs(row["sweep_fa"] - row["fa"]) > 0.0101:
             flags.append("SWEEP SUMMARY FA differs from the recomputed mean")
         row["flags"] = "; ".join(flags)

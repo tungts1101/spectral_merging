@@ -233,6 +233,14 @@ def test_gradient_init(rng, bases):
             G_hat = grad_t.T
         U, S, Vh = np.linalg.svd(G_hat, full_matrices=False)
         assert np.allclose(np.abs(np.linalg.norm(B, axis=1)), S[:RANK], atol=1e-8), "rows of B carry the singular values"
+    # rank above the residual dimension: A stops at d - cols(basis), the rest is zero
+    Q, _ = np.linalg.qr(rng.standard_normal((D, D)))
+    big = Q[:, :D - 3]
+    A, B = ks.gradient_init(grad_t.T, big, RANK)
+    assert A.shape == (D, RANK) and B.shape == (RANK, D)
+    assert np.allclose(A[:, 3:], 0) and np.allclose(B[3:], 0)
+    assert np.allclose(A[:, :3].T @ A[:, :3], np.eye(3), atol=1e-10) and ks.basis_leakage(A, big) < 1e-9
+    assert np.count_nonzero(np.abs(A).sum(axis=0) > 0) == 3
     # a rank larger than the gradient allows, or a basis of the wrong size, raise
     for bad in ((grad_t.T, None, D + 1), (grad_t.T, np.eye(D + 1)[:, :3], RANK)):
         try:

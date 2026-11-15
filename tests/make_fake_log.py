@@ -744,7 +744,8 @@ def make_keeplora_log(ds, cfg_name, seeds=SEEDS, failed_seed=None, fail_at_task=
             leak = 2.0e-7 + 1e-8 * t
             n_batches = 78 if ds == "cifar224" else 37
             lines.append(f"{clock.tick(1.0)} {pre_m}[KeepLoRA] Task {t}: A/B designed for {n_slices} slices from "
-                         f"{n_batches} batches | basis cols min {min(cols)} max {max(cols)} | max|U^T A| {leak:.3e} | B init svd")
+                         f"{n_batches} batches | basis cols min {min(cols)} max {max(cols)} | max|U^T A| {leak:.3e} | B init svd "
+                         f"| rank eff min {max(0, min(lora_r, d - max(cols)))} max {max(0, min(lora_r, d - min(cols)))}")
             info["design"].append((t, leak, max(cols)))
             lines.append(f"{clock.tick(0.1)} {pre_m}[Training] Model21(trainable_params={4 * d * lora_r * 12 + incs[t] * 769:,}, ...)")
             for e in range(epochs):
@@ -752,8 +753,11 @@ def make_keeplora_log(ds, cfg_name, seeds=SEEDS, failed_seed=None, fail_at_task=
                 lines.append(f"{clock.tick(2.0)} {pre_m}[Training] Epoch {e + 1}/{epochs}, Loss: {0.8 / (e + 1):.4f}, "
                              f"Acc: {0.85 + 0.007 * e:.4f}, lr: {lr_e:.3e}")
             added = [1 + (s + t) % 4 for s in range(n_slices)]
-            if saturate and t == n_tasks - 1:
+            if saturate and t == n_tasks - 2:
+                # two slices fill up one task early, so the last task's design line
+                # shows the residual cap (rank eff min 0) and the last subspace line full 2
                 added[0], added[1] = d - cols[0], d - cols[1]
+            added = [min(a, d - c) for c, a in zip(cols, added)]
             cols = [c + a for c, a in zip(cols, added)]
             full = sum(c >= d for c in cols)
             lines.append(f"{clock.tick(1.0)} {pre_m}[KeepLoRA] subspace task {t} eps_f={eps_f} mode=code | "
@@ -1292,6 +1296,16 @@ def build_rebuttal_tree(root, fig_dir):
     t, i = make_keeplora_log("imagenetr", "keeplora_matched_imagenetr", base_acc=78.0, matrix_seed=33,
                              start="2026-11-23 08:00:00", saturate=True)
     put("keeplora_inr", "imagenetr", "keeplora_matched_imagenetr", t, i)
+    # run_keeplora.py mirrors every line of every cell log into <root>/keeplora_campaign.log;
+    # the parser must skip it or each seed is counted twice.
+    mirror = "".join(open(fx[k]["path"], encoding="utf-8").read() for k in ("keeplora_cifar", "keeplora_inr"))
+    fx["keeplora_campaign"] = {"path": write_text(os.path.join(root, "keeplora_campaign.log"), mirror)}
+    # E12 2-D grid: one TIES trim-20 % cell next to the trim-100 % cell at the same coefficient
+    # (appended last so the matrix seeds of the fixtures above are unchanged)
+    # one 2-D-grid cell (TIES trim 20 %): its own cell next to the trim-100 % cell at the same coefficient
+    t, i = sweep("imagenetr", "e12_ties_k20_c0.5", rule="ties", incremental=True, coef=0.5,
+                 extra_config={"train_merge_topk": 20}, base_acc=BASE["imagenetr"] - 2.0)
+    put("e12_imagenetr_ties_k20_c0.5", "imagenetr", "e12_ties_k20_c0.5", t, i, rule="ties", coef=0.5)
     return fx
 
 

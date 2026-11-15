@@ -392,7 +392,7 @@ def _nufilt_adapt(dM, tau, tau_f, V_old, r_v, r_l, iters, lr, generator):
     return delta.detach(), losses
 
 
-def nufilt_pair(base, w_prev, w_new, r_p=128, r_v=8, r_l=64, adapt=False,
+def nufilt_pair(base, w_prev, w_new, r_p=128, r_v=8, r_l=64, adapt=False, coef=1.0,
                 iters=50, lr=1e-3, state=None, seed=0):
     """One NUFILT step (Qiu et al., ICLR 2026, Alg. 1: filter, adapt, fuse)
     on the pair (M_{t-1}, W_t) against base = W_0.
@@ -403,7 +403,9 @@ def nufilt_pair(base, w_prev, w_new, r_p=128, r_v=8, r_l=64, adapt=False,
     with adapt=True, the data-free rank-r_l LoRA fitted by Adam (`iters`,
     `lr`) on the projection-aware objective of _nufilt_adapt; lora_B
     tensors: the left-side filter only; 1-D tensors: identity.  Fuse
-    without a coefficient, M_t = w_prev + tau (P + B A), as in the paper.
+    M_t = w_prev + coef * tau (P + B A); the paper has no coefficient
+    (coef = 1.0, the default); coef < 1 damps the fused step from M_{t-1}
+    like ISM's alpha (rebuttal E12 grid, applied to every tensor).
     At t = 1 (w_prev == base) nothing is filtered or adapted and M_1 = W_1
     exactly.  The paper's defaults are r_p = 128, r_v = 8, r_l = 64,
     50 Adam steps at lr 1e-3; r_p clamps to the LoRA rank here.
@@ -423,7 +425,7 @@ def nufilt_pair(base, w_prev, w_new, r_p=128, r_v=8, r_l=64, adapt=False,
     for k in w_new:
         tau = w_new[k].double() - base[k].double()
         if tau.dim() != 2:
-            out[k] = (w_prev[k].double() + tau).to(w_new[k].dtype)
+            out[k] = (w_prev[k].double() + coef * tau).to(w_new[k].dtype)   # identity filter, damped
             continue
         dM = w_prev[k].double() - base[k].double()
         side = "left" if k.endswith(_LORA_B) else "right"
@@ -439,7 +441,7 @@ def nufilt_pair(base, w_prev, w_new, r_p=128, r_v=8, r_l=64, adapt=False,
             loss_first += losses[0]
             loss_last += losses[-1]
             n_adapted += 1
-        out[k] = (w_prev[k].double() + update).to(w_new[k].dtype)
+        out[k] = (w_prev[k].double() + coef * update).to(w_new[k].dtype)   # coef 1.0 = the paper
     st.update(
         filtered_frac=(1.0 - filt_sq / tau_sq) if tau_sq > 0.0 else 0.0,
         rp_eff_mean=(sum(ranks) / len(ranks)) if ranks else 0.0,
@@ -456,7 +458,8 @@ def sota_merge(base, w_prev, w_new, method, lamb=1.0, dare_q=0.9,
                state=None, task=None):
     """Dispatch. Returns the merged state dict.
 
-    opcm / nufilt (E15a) take their own keyword arguments and ignore `lamb`;
+    opcm / nufilt (E15a) take their own keyword arguments; opcm ignores `lamb`,
+    nufilt damps its fused step by `lamb` (1.0 = the paper's rule; E12 grid);
     `state` is the caller's dict for OPCM's lam_{t-1} and task-vector norms
     and for the per-step statistics of both rules, `task` the step index
     t >= 1 (OPCM only).  The five original rules are unchanged."""
@@ -470,7 +473,7 @@ def sota_merge(base, w_prev, w_new, method, lamb=1.0, dare_q=0.9,
     if method == "nufilt":
         return nufilt_pair(base, w_prev, w_new, r_p=nufilt_rp, r_v=nufilt_rv,
                            r_l=nufilt_rl, adapt=nufilt_adapt, iters=nufilt_iters,
-                           lr=nufilt_lr, state=state)
+                           lr=nufilt_lr, coef=lamb, state=state)
     # Sparsification rules follow their publications: sparsify each TASK
     # VECTOR (w - base) independently, then merge by elementwise mean and
     # add back to the base scaled by lamb — the identical protocol to the

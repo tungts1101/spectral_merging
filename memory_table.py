@@ -102,6 +102,8 @@ def stats_per_class(mode, d=D, rank=None):
         return d * (rank + 2)             # mean + U (d x k) + residual variance
     if mode == "shared":
         return d                          # mean only; one pooled covariance for all classes
+    if mode == "mean":
+        return d                          # the class mean alone (rebuttal E5, prototype head)
     raise ValueError(f"unknown mode {mode!r}")
 
 
@@ -126,6 +128,8 @@ def align_gpu_floats(mode, n_classes, d=D, rank=None):
         return n_classes * (d * rank + 2 * d) + n_classes * rank * rank
     if mode == "shared":
         return n_classes * d + 2 * d * d
+    if mode == "mean":
+        return n_classes * d              # no sampling distributions, prototypes only
     raise ValueError(mode)
 
 
