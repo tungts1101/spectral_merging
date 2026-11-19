@@ -1324,9 +1324,15 @@ class Learner:
                     if sigma > speccap:
                         st["B"].data.mul_(speccap / sigma)
 
-        def run_batch(x, y):
-            x = x.cuda()
-            y = (y - self._known_classes).cuda()
+        # Rebuttal (ViT-L): train_micro_batches m > 1 processes each batch of
+        # train_batch_size in m chunks with one optimizer step on the summed
+        # gradient, so the update equals the whole-batch step (mean loss, no
+        # batch-norm) at 1/m of the activation memory. Default 1 = unchanged.
+        micro = int(self._config.get("train_micro_batches", 1))
+        if micro > 1 and self._is_e2:
+            raise ValueError("train_micro_batches > 1 is not supported with the e2lora recipe")
+
+        def _forward(x, y):
             z = self.model.get_features(x)
             if self._is_e2:
                 # Their loss (e2lora.py:_run): CE on new-class logits of the
@@ -1357,14 +1363,30 @@ class Learner:
                     loss = loss + specreg * _spec_penalty()
                 if l2m_pairs is not None:
                     loss = loss + l2m_weight * _l2m_penalty()
+            return loss, logits
+
+        def run_batch(x, y):
+            x = x.cuda()
+            y = (y - self._known_classes).cuda()
+            bs = len(y)
             optimizer.zero_grad()
-            loss.backward()
+            if micro <= 1:
+                loss, logits = _forward(x, y)
+                loss.backward()
+                loss_sum = loss.item() * bs
+            else:
+                loss_sum, parts = 0.0, []
+                for xc, yc in zip(x.chunk(micro), y.chunk(micro)):
+                    loss_c, logits_c = _forward(xc, yc)
+                    (loss_c * (len(yc) / bs)).backward()
+                    loss_sum += loss_c.item() * len(yc)
+                    parts.append(logits_c.detach())
+                logits = torch.cat(parts)
             optimizer.step()
             if spec_layers is not None and speccap:
                 _spec_cap()
-            bs = len(y)
             acc = (logits.argmax(dim=1) == y).sum().item()
-            return loss.item() * bs, acc, bs
+            return loss_sum, acc, bs
 
         if iterations is None:
             # Epoch mode (exp19): per-epoch cosine schedule; "constant" keeps
@@ -3036,11 +3058,13 @@ DATA_TABLE = {
     # offset by session -> structurally identical to CIL for the learner.
     "officehome_dil": [(4, 65, 65)],
     "dndil": [(6, 345, 345)],
+    # X-TAIL (RAIL): 10 domains = 10 tasks of unequal size (utils.data.XTAIL_INCREMENTS).
+    "xtail": [(10, 100, [100, 100, 47, 10, 102, 101, 10, 37, 196, 397])],
 }
 
 TOTAL_CLASSES = {"cifar224": 100, "imageneta": 200, "imagenetr": 200,
                  "cub": 200, "cars": 196,
-                 "officehome_dil": 260, "dndil": 2070}
+                 "officehome_dil": 260, "dndil": 2070, "xtail": 1100}
 
 BASE_CONFIG = {
     "seed": 1993,
@@ -3265,7 +3289,7 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
 
     # DIL datasets carry domain structure in the label offsets — the class
     # order must NOT be shuffled (their protocol uses a fixed domain order).
-    shuffle_order = not dataset_name.endswith("dil")
+    shuffle_order = not (dataset_name.endswith("dil") or dataset_name == "xtail")
     data_manager = DataManager(
         config["dataset_name"], shuffle_order, config["seed"],
         config["dataset_init_cls"], config["dataset_increment"], False,

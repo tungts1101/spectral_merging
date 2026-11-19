@@ -70,11 +70,12 @@ DATA_TABLE = {
     "cars": (10, 16, 20),
     "officehome_dil": (4, 65, 65),
     "dndil": (6, 345, 345),
+    "xtail": (10, 100, [100, 100, 47, 10, 102, 101, 10, 37, 196, 397]),   # RAIL stream, one task per domain
 }
 # main.TOTAL_CLASSES (main.py:1741-1743)
 TOTAL_CLASSES = {"cifar224": 100, "imageneta": 200, "imagenetr": 200,
                  "cub": 200, "cars": 196,
-                 "officehome_dil": 260, "dndil": 2070}
+                 "officehome_dil": 260, "dndil": 2070, "xtail": 1100}
 
 # BASE_CONFIG merge keys (main.py:1787-1793) that merged_checkpoint reads when a
 # config does not set them.
@@ -273,6 +274,8 @@ def n_tasks(ds, config=None):
     inc = config.get("dataset_increment", inc)
     if config.get("joint", False):
         return 1
+    if isinstance(inc, (list, tuple)):          # explicit per-task sizes (xtail)
+        return len(inc)
     return len(task_increments(TOTAL_CLASSES[ds], init, inc))
 
 

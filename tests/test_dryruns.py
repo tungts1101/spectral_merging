@@ -63,9 +63,12 @@ EXPECTED = {
     "run_driftdiag.py": (["--splits", "t10"], 4),           # 4 datasets x 10-task split
     "run_inflora.py": ([], None),                           # stage-dependent
     "run_keeplora.py": ([], 4),                             # main stage: one cell per dataset (3 seeds each)
+    "run_vitl.py": ([], 1),                                 # ViT-L/16 ISM cell on ImageNet-R (--controls adds 2)
+    "run_rail_fewshot.py": ([], 2),                         # RAIL-Adapter rows, K in {5, 10} (standalone launcher)
+    "run_xtail.py": ([], 1),                                # ISM on CLIP ViT-B/16 in RAIL's X-TAIL stream
 }
 SCRIPT_GLOBS = ("run_e*.py", "run_long.py", "run_covmode.py", "run_driftdiag.py", "run_inflora.py",
-                "run_keeplora.py")
+                "run_keeplora.py", "run_vitl.py", "run_rail_fewshot.py", "run_xtail.py")
 
 LOG_PREFIX = "2026-11-08 10:00:00,123 [main.py] => "
 DASH = "—"

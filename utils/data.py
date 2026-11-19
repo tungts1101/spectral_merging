@@ -524,3 +524,154 @@ class dndil(iData):
         self.test_data, self.test_targets = _dil_load(
             root, self.domains, self.classes_per_domain, "test")
 
+
+# ----------------------------------------------------------------------------
+# X-TAIL stream (RAIL, Xu et al., NeurIPS 2024): ten domains in RAIL's order,
+# CoOp splits (split_zhou_*.json), labels offset per domain so the stream is
+# class-incremental for the learner (one task = one domain). Images come from
+# torchvision's download layout under XTAIL_ROOT (scripts/xtail_download.py),
+# the split files from XTAIL_ROOT/splits (scripts/xtail_splits.py), Stanford
+# Cars from DATA_ROOT/stanford_cars. Inputs use CLIP's normalisation (the
+# backbone is CLIP's image tower). Few-shot training (RAIL: 16 per class) is
+# the DataManager hook data_fewshot_k, applied on top of the CoOp train split.
+# ----------------------------------------------------------------------------
+import json
+
+XTAIL_ROOT = os.environ.get("XTAIL_ROOT", os.path.join(DATA_ROOT, "xtail"))
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+# (domain, classes, kind, image-dir candidates, split file, RAIL template)
+XTAIL_DOMAINS = [
+    ("aircraft", 100, "aircraft",
+     ["fgvc_aircraft/fgvc-aircraft-2013b/data", "fgvc_aircraft/data", "fgvc_aircraft"], None,
+     "a photo of a {}, a type of aircraft."),
+    ("caltech101", 100, "coop",
+     ["caltech101/caltech101/101_ObjectCategories", "caltech101/101_ObjectCategories"],
+     "split_zhou_Caltech101.json", "a photo of a {}."),
+    ("dtd", 47, "coop", ["dtd/dtd/dtd/images", "dtd/dtd/images", "dtd/images"],
+     "split_zhou_DescribableTextures.json", "{} texture."),
+    ("eurosat", 10, "coop", ["eurosat/eurosat/2750", "eurosat/2750"],
+     "split_zhou_EuroSAT.json", "a centered satellite photo of {}."),
+    ("oxford_flowers", 102, "coop", ["flowers102/flowers-102/jpg", "oxford_flowers/jpg"],
+     "split_zhou_OxfordFlowers.json", "a photo of a {}, a type of flower."),
+    ("food101", 101, "coop", ["food101/food-101/images", "food-101/images"],
+     "split_zhou_Food101.json", "a photo of {}, a type of food."),
+    ("mnist", 10, "mnist", ["mnist"], None, 'a photo of the number: "{}".'),
+    ("oxford_pets", 37, "coop", ["oxford_pets/oxford-iiit-pet/images", "oxford_pets/images"],
+     "split_zhou_OxfordPets.json", "a photo of a {}, a type of pet."),
+    ("stanford_cars", 196, "coop", [os.path.join(DATA_ROOT, "stanford_cars"), "stanford_cars"],
+     "split_zhou_StanfordCars.json", "a photo of a {}."),
+    ("sun397", 397, "coop", ["sun397/SUN397", "SUN397"], "split_zhou_SUN397.json", "a photo of a {}."),
+]
+XTAIL_INCREMENTS = [n for _, n, _, _, _, _ in XTAIL_DOMAINS]      # sums to 1,100
+
+
+def _xtail_dir(cands):
+    for c in cands:
+        p = c if os.path.isabs(c) else os.path.join(XTAIL_ROOT, c)
+        if os.path.isdir(p):
+            return p
+    raise FileNotFoundError(f"X-TAIL: none of {cands} exists under {XTAIL_ROOT}")
+
+
+def _xtail_coop(image_dir, split_file, n_classes):
+    """CoOp split: {'train'|'val'|'test': [[impath, label, classname], ...]}."""
+    with open(os.path.join(XTAIL_ROOT, "splits", split_file)) as f:
+        split = json.load(f)
+    out = {}
+    names = [None] * n_classes
+    for key in ("train", "test"):
+        paths, labels = [], []
+        for impath, label, cname in split[key]:
+            paths.append(os.path.join(image_dir, impath))
+            labels.append(int(label))
+            names[int(label)] = cname
+        out[key] = (paths, labels)
+    assert all(n is not None for n in names), f"{split_file}: a class without samples"
+    return out["train"], out["test"], names
+
+
+def _xtail_aircraft(data_dir):
+    """FGVC-Aircraft variants: images_variant_{train,test}.txt, '<image> <variant>'."""
+    with open(os.path.join(data_dir, "variants.txt")) as f:
+        names = [l.strip() for l in f if l.strip()]
+    index = {n: i for i, n in enumerate(names)}
+    out = []
+    for key in ("train", "test"):
+        paths, labels = [], []
+        with open(os.path.join(data_dir, f"images_variant_{key}.txt")) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                im, name = line.split(" ", 1)
+                paths.append(os.path.join(data_dir, "images", im + ".jpg"))
+                labels.append(index[name])
+        out.append((paths, labels))
+    return out[0], out[1], names
+
+
+def _xtail_mnist(root):
+    """MNIST as PNG files (written once from torchvision's download), RAIL class names."""
+    png = os.path.join(XTAIL_ROOT, "mnist_png")
+    marker = os.path.join(png, "DONE")
+    if not os.path.isfile(marker):
+        for key, train in (("train", True), ("test", False)):
+            ds = datasets.MNIST(root, train=train, download=False)
+            for i in range(len(ds)):
+                d = os.path.join(png, key, str(int(ds.targets[i])))
+                os.makedirs(d, exist_ok=True)
+                ds[i][0].convert("RGB").save(os.path.join(d, f"{i}.png"))
+        open(marker, "w").close()
+    out = []
+    for key in ("train", "test"):
+        paths, labels = [], []
+        for c in range(10):
+            d = os.path.join(png, key, str(c))
+            for fn in sorted(os.listdir(d), key=lambda s: int(s.split(".")[0])):
+                paths.append(os.path.join(d, fn))
+                labels.append(c)
+        out.append((paths, labels))
+    return out[0], out[1], [f'number: "{c}"' for c in range(10)]
+
+
+class xtail(iData):
+    """X-TAIL: 10 domains (1,100 classes) as 10 tasks, CoOp splits, CLIP inputs."""
+    use_path = True
+    train_trsf = build_transform(True, None)
+    test_trsf = build_transform(False, None)
+    common_trsf = [transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)]
+    class_order = np.arange(sum(XTAIL_INCREMENTS)).tolist()
+    domains = [d[0] for d in XTAIL_DOMAINS]
+    increments = list(XTAIL_INCREMENTS)
+
+    def __init__(self, use_input_norm=True):
+        # CLIP normalisation regardless of use_input_norm: the stream exists
+        # only for CLIP's image tower.
+        self.common_trsf = [transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)]
+
+    def download_data(self):
+        xs, ys, xt, yt = [], [], [], []
+        self.classnames, self.templates, offset = [], [], 0
+        for name, n_cls, kind, cands, split_file, template in XTAIL_DOMAINS:
+            d = _xtail_dir(cands)
+            if kind == "coop":
+                train, test, names = _xtail_coop(d, split_file, n_cls)
+            elif kind == "aircraft":
+                train, test, names = _xtail_aircraft(d)
+            else:
+                train, test, names = _xtail_mnist(d)
+            assert len(names) == n_cls, (name, len(names), n_cls)
+            assert max(train[1]) < n_cls and max(test[1]) < n_cls, name
+            probe = train[0][0]
+            if not os.path.isfile(probe):
+                raise FileNotFoundError(f"X-TAIL {name}: {probe} not found (image dir {d})")
+            xs += train[0]
+            ys += [l + offset for l in train[1]]
+            xt += test[0]
+            yt += [l + offset for l in test[1]]
+            self.classnames += names
+            self.templates += [template] * n_cls
+            offset += n_cls
+        self.train_data, self.train_targets = np.array(xs), np.array(ys)
+        self.test_data, self.test_targets = np.array(xt), np.array(yt)

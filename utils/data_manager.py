@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image, ImageOps, ImageFilter
 from torch.utils.data import Dataset
 from torchvision import transforms
-from utils.data import iCIFAR224, iImageNetR, iImageNetA, CUB, omnibenchmark, vtab, cars, core50, cddb, domainnet, iTinyImageNet, iPlaces365, officehome_dil, dndil
+from utils.data import iCIFAR224, iImageNetR, iImageNetA, CUB, omnibenchmark, vtab, cars, core50, cddb, domainnet, iTinyImageNet, iPlaces365, officehome_dil, dndil, xtail
 import random
 from utils import splits
 
@@ -17,13 +17,18 @@ class DataManager(object):
         # applied once on the remapped labels, before the task increments.
         # All four keyword-only arguments default to the no-op.
         self._apply_splits(seed, val_frac, val_seed, fewshot_k, subsample_seed)
-        assert init_cls <= len(self._class_order), "No enough classes."
-        self._increments = [init_cls]
-        while sum(self._increments) + increment < len(self._class_order):
-            self._increments.append(increment)
-        offset = len(self._class_order) - sum(self._increments)
-        if offset > 0:
-            self._increments.append(offset)
+        if isinstance(increment, (list, tuple)):
+            # Multi-domain stream (xtail): one task per domain, explicit sizes.
+            self._increments = [int(x) for x in increment]
+            assert sum(self._increments) == len(self._class_order), "task sizes must cover every class"
+        else:
+            assert init_cls <= len(self._class_order), "No enough classes."
+            self._increments = [init_cls]
+            while sum(self._increments) + increment < len(self._class_order):
+                self._increments.append(increment)
+            offset = len(self._class_order) - sum(self._increments)
+            if offset > 0:
+                self._increments.append(offset)
     
     def get_task_sizes(self):
         return self._increments
@@ -291,6 +296,8 @@ def _get_idata(dataset_name,use_input_norm):
         return officehome_dil(use_input_norm)
     elif name=="dndil":
         return dndil(use_input_norm)
+    elif name=="xtail":
+        return xtail(use_input_norm)
     elif "core50" in name:
         logging.info('Starting next DIL task: '+name)
         return core50(name[7::],use_input_norm)

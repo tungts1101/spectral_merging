@@ -17,6 +17,16 @@ Cells (logs_main/<ds>/<cell>.log, run_config_sweep format)
     long_<split>                   headline posture of the dataset (rebuttal_common.cfg:
                                    pspectral only_A p 0.9, headline alpha / lambda /
                                    weight decay / local-term weight)
+    long_<split>_a<a>_p<p>[_l<l>]  --cells A:P[:L]: one Stage-2 cell per spec at merge step
+                                   alpha = A, energy fraction p = P and (optional) drift
+                                   lambda = L, on the same cached chain; --tag <s> suffixes
+                                   every cell name (a chain trained with other settings,
+                                   e.g. --epochs 5 --prefix ..._e5 --tag _e5).
+    long_<split>_lgcv              --lambda-gcv: headline alpha / p with lambda chosen per task by
+                                   generalised cross-validation (train_drift_lambda_rule = 'gcv').
+    long_<split>_plain<tag>        --plain: the sequential chain alone (train_merge none, no drift
+                                   map, no alignment); with --lr / --epochs / --batch-size it trains
+                                   and evaluates a chain under other training settings (own --prefix).
     long_<split>_a<alpha>_l<lam>   --grid: alpha in {headline, 0.1, 0.3} x lambda in
                                    {100, 1000} minus the headline pair (that is the
                                    cell above).  Stage 2 only on the cached chain, so
@@ -69,6 +79,9 @@ LONG_SPLITS = ("t20", "t50")
 EPOCHS_50 = 5                   # RESULTS.md section 4, "Stability note"
 GRID_ALPHAS = (0.1, 0.3)        # plus the headline alpha of the dataset
 GRID_LAMBDAS = (100.0, 1000.0)
+# lambda candidates of the GCV rule (--lambda-gcv / --lambda-rule gcv): main.py's default grid stops
+# at 1000, which the first 20-task CIFAR cell picked at the edge, so the long-split cells use a wider one.
+GCV_LAMBDA_GRID = (1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10000.0, 30000.0, 100000.0)
 
 
 # ----------------------------------------------------------------------------
@@ -109,13 +122,15 @@ def fallback_prefix(ds, split, small_task_epochs=None, family=None):
     return pre
 
 
-def long_cfg(ds, split, prefix, alpha=None, lam=None, epochs=None, small_task_epochs=None, **over):
+def long_cfg(ds, split, prefix, alpha=None, lam=None, epochs=None, small_task_epochs=None, p=None,
+             lr=None, batch_size=None, plain=False, lambda_rule=None, modules=None, **over):
     """Headline Stage-2 config of `ds` on the long split with the chain `prefix`.
 
     train_epochs is 5 for 50-task chains (EPOCHS_50) unless `epochs` is given;
     `small_task_epochs` sets train_epochs_small_task (main.train_backbone: that
     many epochs for a task with <= train_small_task_max_classes = 4 classes);
-    `alpha` / `lam` override train_merge_alpha / train_drift_lambda (grid cells).
+    `alpha` / `lam` / `p` override train_merge_alpha / train_drift_lambda /
+    pspectral_p (grid and --cells cells).
     """
     T, init, inc = split_params(ds, split)
     c = rc.cfg(ds, train_prefix=prefix, dataset_num_task=T, dataset_init_cls=init,
@@ -126,10 +141,26 @@ def long_cfg(ds, split, prefix, alpha=None, lam=None, epochs=None, small_task_ep
         c["train_epochs"] = int(epochs)
     if small_task_epochs is not None:
         c["train_epochs_small_task"] = int(small_task_epochs)
+    if lr is not None:
+        c["train_base_lr"] = float(lr)      # head lr follows (train_head_lr unset)
+    if batch_size is not None:
+        c["train_batch_size"] = int(batch_size)
+    if modules is not None:
+        c["model_lora_target_modules"] = list(modules)
+    if plain:
+        c["train_merge"] = "none"
+        c["train_ca"] = False
+        c["train_drift"] = False
+    if lambda_rule is not None:
+        c["train_drift_lambda_rule"] = lambda_rule
+        if lambda_rule == "gcv":
+            c["train_drift_lambda_grid"] = list(GCV_LAMBDA_GRID)
     if alpha is not None:
         c["train_merge_alpha"] = float(alpha)
     if lam is not None:
         c["train_drift_lambda"] = float(lam)
+    if p is not None:
+        c["pspectral_p"] = float(p)
     c.update(over)
     return c
 
@@ -142,21 +173,60 @@ def grid_pairs(ds):
     return [(a, l) for a in alphas for l in GRID_LAMBDAS if not (a == head_a and l == head_l)]
 
 
-def cell_name(split, alpha=None, lam=None):
+def cell_name(split, alpha=None, lam=None, p=None, tag=""):
+    """long_<split>[<tag>] for the reproduction cell; long_<split>_a<alpha>_l<lam> for
+    the --grid cells (unchanged names); long_<split>_a<alpha>_p<p>[_l<lam>] for --cells."""
     if alpha is None:
-        return f"long_{split}"
-    return f"long_{split}_a{alpha:g}_l{lam:g}"
+        return f"long_{split}{tag}"
+    name = f"long_{split}_a{alpha:g}"
+    if p is not None:
+        name += f"_p{p:g}"
+    if lam is not None:
+        name += f"_l{lam:g}"
+    return name + tag
 
 
-def build_cells(ds, split, prefix, ckpt_dir, grid=False, epochs=None, small_task_epochs=None):
-    """OrderedDict {cell name: config} for (ds, split): the reproduction cell and,
-    with grid=True, the sensitivity cells."""
-    common = dict(epochs=epochs, small_task_epochs=small_task_epochs, checkpoint_dir=ckpt_dir)
+def parse_cell_spec(spec):
+    """'A:P' or 'A:P:L' -> (alpha, p, lam or None); SystemExit on a malformed spec."""
+    parts = spec.split(":")
+    if len(parts) not in (2, 3):
+        raise SystemExit(f"--cells expects A:P or A:P:L, got {spec!r}")
+    try:
+        alpha, pp = float(parts[0]), float(parts[1])
+        lam = float(parts[2]) if len(parts) == 3 else None
+    except ValueError:
+        raise SystemExit(f"--cells expects numbers, got {spec!r}")
+    if not (0.0 < pp <= 1.0):
+        raise SystemExit(f"--cells: p must be in (0, 1], got {pp}")
+    return alpha, pp, lam
+
+
+def build_cells(ds, split, prefix, ckpt_dir, grid=False, epochs=None, small_task_epochs=None,
+                cell_specs=(), tag="", lr=None, batch_size=None, plain=False, lambda_gcv=False,
+                no_base=False, lambda_rule=None, modules=None):
+    """OrderedDict {cell name: config} for (ds, split): the reproduction cell, with
+    grid=True the sensitivity cells, and one cell per (alpha, p, lam) of `cell_specs`."""
+    common = dict(epochs=epochs, small_task_epochs=small_task_epochs, lr=lr, batch_size=batch_size,
+                  modules=modules, checkpoint_dir=ckpt_dir)
     cells = OrderedDict()
-    cells[cell_name(split)] = long_cfg(ds, split, prefix, **common)
+    if plain:
+        cells[f"long_{split}_plain{tag}"] = long_cfg(ds, split, prefix, plain=True, **common)
+        return cells
+    if not no_base:
+        cells[cell_name(split, tag=tag)] = long_cfg(ds, split, prefix, **common)
+    if lambda_gcv:
+        cells[f"long_{split}_lgcv{tag}"] = long_cfg(ds, split, prefix, lambda_rule="gcv", **common)
     if grid:
         for a, l in grid_pairs(ds):
-            cells[cell_name(split, a, l)] = long_cfg(ds, split, prefix, alpha=a, lam=l, **common)
+            cells[cell_name(split, a, l, tag=tag)] = long_cfg(ds, split, prefix, alpha=a, lam=l, **common)
+    rule_tag = "" if lambda_rule is None else f"_l{lambda_rule}"
+    for a, pp, l in cell_specs:
+        if l is not None and lambda_rule is not None:
+            raise SystemExit("--cells A:P:L and --lambda-rule exclude each other")
+        name = cell_name(split, a, l, pp, rule_tag + tag)
+        if name in cells:
+            raise SystemExit(f"--cells: duplicate cell {name}")
+        cells[name] = long_cfg(ds, split, prefix, alpha=a, lam=l, p=pp, lambda_rule=lambda_rule, **common)
     return cells
 
 
@@ -289,11 +359,35 @@ def main(argv=None):
                     help="splits to run (default: every split defined for the dataset)")
     ap.add_argument("--grid", action="store_true",
                     help="add the alpha x lambda sensitivity cells (test-set study)")
+    ap.add_argument("--cells", nargs="+", default=[], metavar="A:P[:L]",
+                    help="extra Stage-2 cells on the cached chain: merge step alpha A, energy "
+                         "fraction p P, optional drift lambda L (default: headline lambda)")
+    ap.add_argument("--tag", default="",
+                    help="suffix for every cell name (log file), e.g. _e5 for a 5-epoch chain")
     ap.add_argument("--prefix", default=None,
                     help="train_prefix of the long chain (one dataset x split only); default: "
                          "check_cache lookup, fallback <headline prefix>_<split>")
     ap.add_argument("--epochs", type=int, default=None,
                     help="train_epochs override (default: BASE_CONFIG for 20 tasks, 5 for 50 tasks)")
+    ap.add_argument("--plain", action="store_true",
+                    help="the sequential chain alone: train_merge none, no drift map, no alignment "
+                         "(one cell long_<split>_plain<tag>; trains the chain if it is not cached)")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="train_batch_size override for the chain (trains a new chain; own --prefix/--tag)")
+    ap.add_argument("--modules", nargs="+", default=None, choices=("qkv", "fc1", "fc2", "proj"),
+                    help="model_lora_target_modules override, e.g. --modules qkv (trains a new chain; own --prefix/--tag)")
+    ap.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE",
+                    help="config overrides applied to every cell (Stage-2 knobs such as "
+                         "train_ca_robust_weight=0.3 train_ca_n_classes=20); give the cells a --tag")
+    ap.add_argument("--lambda-gcv", action="store_true",
+                    help="add the cell long_<split>_lgcv<tag>: headline alpha / p, lambda per task by GCV")
+    ap.add_argument("--lambda-rule", choices=("gcv",), default=None,
+                    help="drift lambda rule for every --cells cell (cell names get _lgcv)")
+    ap.add_argument("--no-base", action="store_true",
+                    help="skip the reproduction cell (when it already ran; --cells / --lambda-gcv only)")
+    ap.add_argument("--lr", type=float, default=None,
+                    help="train_base_lr override for the chain (trains a new chain; give it its own "
+                         "--prefix and --tag, e.g. --lr 0.005 --prefix <headline>_t20_lr0.005 --tag _lr0.005)")
     ap.add_argument("--small-task-epochs", type=int, default=None,
                     help="train_epochs_small_task: epochs for tasks with <= 4 classes "
                          "(trains a new chain; the fallback prefix gets _st<N>)")
@@ -326,7 +420,25 @@ def main(argv=None):
         ckpt_dir = prepare_ckpt_dir(ds, prefix, args.seeds, T, job, args.ckpt_src,
                                     dry_run=args.dry_run, smoke=args.smoke)
         cells = build_cells(ds, split, prefix, ckpt_dir, grid=args.grid, epochs=args.epochs,
-                            small_task_epochs=args.small_task_epochs)
+                            small_task_epochs=args.small_task_epochs,
+                            cell_specs=[parse_cell_spec(s) for s in args.cells], tag=args.tag,
+                            lr=args.lr, batch_size=args.batch_size, plain=args.plain,
+                            lambda_gcv=args.lambda_gcv, no_base=args.no_base,
+                            lambda_rule=args.lambda_rule, modules=args.modules)
+        if (args.lr is not None or args.batch_size is not None or args.modules is not None) and not args.prefix:
+            raise SystemExit("--lr / --batch-size / --modules train a new chain: pass --prefix (and --tag) so it does not reuse the headline chain")
+        if not cells:
+            raise SystemExit("no cells (--no-base without --cells / --lambda-gcv)")
+        for kv in args.set:
+            if "=" not in kv:
+                raise SystemExit(f"--set expects KEY=VALUE, got {kv!r}")
+            k, v = kv.split("=", 1)
+            try:
+                val = int(v) if v.lstrip("-").isdigit() else float(v)
+            except ValueError:
+                val = v
+            for c in cells.values():
+                c[k] = val
         rc.launch(ds, cells, args.seeds, **rc.launch_kwargs(args))
         total += len(cells)
     if args.dry_run:
