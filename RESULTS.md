@@ -559,6 +559,141 @@ rows above use 5 epochs.
 
 ---
 
+## 5. 20-task CIFAR-100 — hyperparameter campaign (18–19 Nov 2026)
+
+**Status: not in the paper.** The submitted 20-task row (Section 4) stands; this section records
+what was learned after the rebuttal, so that it can be traced and reused for a revision or a
+50-task follow-up. Every cell below is in the Drive backup
+(`ICLR_2027/rebuttal_2026-11/logs/logs_{bio,greenhorn}_20261120.tar.gz`, files
+`logs_main/cifar224/long_t20*.log`); the queue scripts with the exact command lines are in
+`scripts_home_{bio,greenhorn}.tar.gz` of the same folder. All runs use `run_long.py` at commit
+d490d10 (`--ds cifar224 --split t20`, options `--cells ALPHA:P`, `--lambda-rule gcv`,
+`--set KEY=VALUE`, `--tag`), ViT-B/16-IN21K, LoRA r = 64, weight decay 5e-4, seeds 1993 / 1994 /
+1995, metrics FA / AA / Forgetting (log fields FAA / ASA / FFM). Multi-seed values are mean ±
+population std over the per-seed finals.
+
+### 5.1 Chain and reproduction of the paper row
+
+The original 20-task chains were lost with sakura (never backed up), so the chain was retrained
+on bio with the paper recipe (SGD momentum 0.9, lr 1e-2 cosine to 1e-6, batch 64, 10 epochs,
+qkv + fc1 + fc2; `train_prefix main_cifar224_r64_qkvfc_t20`; backed up as
+`rebuttal_2026-11/checkpoints/long_cifar224_t20_paperchain_s*.tar`). The paper's Stage-2
+setting on it (α 0.15, p 0.9, λ 100, alignment weight 0.2 / N 40 / K 64):
+
+| Chain | FA | AA | Forgetting | log |
+|---|---|---|---|---|
+| paper (Section 4, sakura chain) | 90.35 ± 0.12 | 94.36 ± 0.17 | 5.03 ± 0.21 | – |
+| retrained chain, 3 seeds | 90.06 ± 0.34 | 94.26 ± 0.06 | 5.21 ± 0.29 | `long_t20.log` (bio) |
+
+Within seed noise; every comparison below is against this retrained chain.
+
+### 5.2 Merge: α × p with λ by ridge GCV (bio, seed 1993, paper chain, paper alignment)
+
+λ is chosen per task by generalised cross-validation over
+{1, 3, 10, 30, 100, 300, 1e3, 3e3, 1e4, 3e4, 1e5}; it picks 1000 at almost every task (3000 at
+a few), never the paper's 100. FA / Forgetting per cell (`long_t20_a{α}_p{p}_lgcv.log`):
+
+| α \ p | 0.02 | 0.05 | 0.1 | 0.2 | 0.3 | 0.4 | 0.5 |
+|---|---|---|---|---|---|---|---|
+| 0.15 | – | – | 90.66 / 4.46 | 90.47 / 4.67 | 90.41 / 4.77 | 90.49 / 4.68 | 90.41 / 4.75 |
+| 0.10 | 91.03 / 3.75 | 91.11 / 3.71 | 91.14 / 3.66 | 91.06 / 3.80 | 90.96 / 3.94 | 90.96 / 4.00 | 90.91 / 4.04 |
+| 0.05 | 91.22 / 3.14 | 91.30 / 3.09 | **91.31 / 3.06** | 91.32 / 3.05 | 91.32 / 3.09 | – | 91.33 / 3.14 |
+| 0.03 | 91.06 / 2.88 | 90.99 / 2.98 | 91.11 / 2.91 | – | 91.20 / 2.80 | – | – |
+| 0.02 | – | 90.81 / 3.06 | 90.86 / 3.02 | – | – | – | – |
+| 0.01 | – | – | 90.46 / 3.13 | – | – | – | – |
+
+AA is 94.4–94.6 for α ≥ 0.05 and falls with α below that (94.3 at 0.03, 94.1 at 0.02, 93.9 at
+0.01). Reading: (i) α is the knob that matters; FA peaks at α = 0.05 for every p and loses
+about 0.5 at the paper's 0.15. (ii) At fixed α ≥ 0.1, forgetting falls monotonically as p
+shrinks (α 0.1: 4.04 → 3.66 from p 0.5 to 0.1; α 0.15: 4.75 → 4.46) while FA rises; at α 0.05
+the p rows tie on FA, so p = 0.1 is chosen for the lower forgetting. (iii) Below α 0.05 the
+deployed model moves too little (AA drops).
+
+### 5.3 Training parameters (greenhorn, seed 1993, raw chain only: no merge / drift / alignment)
+
+`--plain` runs (`long_t20_plain_*.log`), FA / AA / Forgetting of the bare sequential chain:
+
+| epochs | lr 1e-2, batch 64 | lr 5e-3 | lr 1e-3 | lr 5e-2 | batch 128 | batch 32 | batch 16 |
+|---|---|---|---|---|---|---|---|
+| 10 | 82.36 / 89.15 / 12.14 | 84.11 / 90.65 / 10.69 | 78.79 / 88.25 / 13.69 | diverged | 83.65 / 90.51 / 10.94 | 75.77 / 84.40 / 18.62 | diverged |
+| 5 | 81.34 / 89.43 / 12.17 | 84.05 / 90.47 / 9.14 | 79.26 / 87.63 / 11.67 | diverged | 81.60 / 89.47 / 11.42 | 77.30 / 85.43 / 16.09 | diverged |
+
+The best raw chains (lr 5e-3; batch 128; 5 epochs at lr 5e-3) were then run through the full
+pipeline at α 0.05 / p 0.1 / λ GCV, seed 1993: 91.14 / 94.50 / 3.22 (lr 5e-3), 91.11 / 94.45 /
+3.32 (batch 128), 90.92 / 94.29 / 3.19 (5 epochs, lr 5e-3), against 91.31 / 94.49 / 3.06 on
+the paper chain. Reading: what helps the bare chain does not help the merged pipeline; the
+training recipe of the paper is kept. (Paper Stage-2 setting α 0.15 / p 0.9 / λ 100 on the
+alternative chains: 5-epoch chain 90.24 ± 0.07 over 2 seeds, lr 5e-3 chain 90.29, seed 1993.)
+
+### 5.4 Learning rate × LoRA modules, full pipeline, 3 seeds (greenhorn, p 0.1, λ GCV)
+
+| chain | α | FA | AA | Forgetting | log |
+|---|---|---|---|---|---|
+| lr 1e-2, qkv + fc1 + fc2 (paper chain) | 0.05 | **91.26 ± 0.08** | 94.39 ± 0.13 | 3.28 ± 0.17 | `..._lgcv_lr0.01` |
+| lr 1e-2, qkv + fc1 + fc2 | 0.10 | 90.94 ± 0.14 | **94.45 ± 0.11** | 3.99 ± 0.20 | |
+| lr 5e-3, qkv + fc1 + fc2 | 0.05 | **91.26 ± 0.11** | 94.45 ± 0.07 | 3.36 ± 0.20 | `..._lgcv_lr0.005` |
+| lr 5e-3, qkv + fc1 + fc2 | 0.10 | 90.73 ± 0.06 | 94.41 ± 0.17 | 4.34 ± 0.27 | |
+| lr 1e-2, qkv only | 0.05 | 91.09 ± 0.16 | 94.26 ± 0.14 | 3.29 ± 0.04 | `..._lgcv_qkv` |
+| lr 1e-2, qkv only | 0.10 | 91.00 ± 0.03 | 94.32 ± 0.08 | 3.67 ± 0.10 | |
+| lr 5e-3, qkv only | 0.05 | 90.97 ± 0.18 | 94.09 ± 0.06 | **3.11 ± 0.06** | `..._lgcv_qkv_lr0.005` |
+| lr 5e-3, qkv only | 0.10 | 90.95 ± 0.14 | 94.23 ± 0.01 | 3.60 ± 0.06 | |
+
+lr 1e-2 and 5e-3 tie; qkv-only loses 0.2–0.3 FA. α 0.05 beats 0.10 on every chain.
+
+### 5.5 Alignment knobs (paper chain, α 0.05, p 0.1, λ GCV)
+
+Seed 1993 unless stated; FA / AA / Forgetting. Paper values: local-term weight 0.2, N = 40
+classes per step, K = 64 samples per class, 10 epochs × 100 steps.
+
+| knob | values → FA / AA / Forgetting | log tag |
+|---|---|---|
+| local-term weight | 0: 91.34 / 94.47 / 3.03 · 0.1: 91.31 / 94.47 / 3.05 · **0.2: 91.31 / 94.49 / 3.06** · 0.3: 91.30 / 94.49 / 3.07 · 0.4: 91.29 / 94.50 / 3.04 · 0.5: 91.32 / 94.50 / 3.02 | `_w*` |
+| classes per step N | 5: 91.14 / 94.33 / 3.61 · 10: 91.17 / 94.42 / 3.67 · 20: 91.32 / 94.47 / 3.17 · **40: 91.31 / 94.49 / 3.06** · 100: 91.28 ± 0.13 / 94.38 ± 0.13 / 3.26 ± 0.21 (3 seeds) | `_n*` |
+| samples K | 32: 91.29 / 94.48 / 3.06 · **64: 91.31 / 94.49 / 3.06** · 128: 91.34 / 94.48 / 3.02 | `_k*` |
+| steps per epoch (3 seeds, greenhorn) | 30: 91.04 ± 0.06 / 94.22 ± 0.09 / 3.16 ± 0.17 · 50: 91.24 ± 0.10 / 94.29 ± 0.12 / 3.11 ± 0.10 · **100: 91.26 ± 0.08 / 94.39 ± 0.13 / 3.28 ± 0.17** | `_s*` |
+
+Weight, N (≥ 20) and K are flat within the 3-seed spread (the single-seed N = 100 gain of
++0.13 vanished at 3 seeds); 50 steps match 100, 30 lose 0.2 FA. Keep the paper's alignment.
+
+### 5.6 Adaptive damping (3 seeds, paper chain, p 0.1, λ GCV, paper alignment)
+
+Rules of the adaptive-damping appendix (`merge_alpha_rule`): spectral norm
+α_t = clip(τ / σ₁(Δ_t)) and feature shift α_t = clip(κ / s_t), floor `merge_alpha_min`.
+
+| rule | constants | realised α (min–max, mean) | FA | AA | Forgetting | log tag |
+|---|---|---|---|---|---|---|
+| fixed α 0.05 (reference) | – | 0.05 | **91.26 ± 0.08** | **94.39 ± 0.13** | 3.28 ± 0.17 | `_lgcv_lr0.01` |
+| spectral norm, paper constant | τ 0.1, floor 0.05 | 0.19–0.82, 0.52 | 87.80 ± 0.35 | 93.26 ± 0.32 | 8.14 ± 0.52 | `_specnorm` |
+| feature shift, paper constant | κ 0.15, floor 0.05 | 0.29–0.56, 0.44 | 88.20 ± 0.27 | 93.51 ± 0.16 | 7.65 ± 0.32 | `_featshift` |
+| spectral norm, recalibrated | τ 0.01, floor 0.01 | 0.015–0.055, 0.028 | 91.12 ± 0.16 | 94.25 ± 0.13 | **3.09 ± 0.15** | `_specnorm0.01` |
+| feature shift, recalibrated | κ 0.017, floor 0.01 | 0.029–0.044, 0.036 | 91.20 ± 0.20 | 94.29 ± 0.13 | **3.09 ± 0.14** | `_featshift0.017` |
+
+The paper constants were set for a mean α of 0.3 on ImageNet-R; carried to this split they
+realise α 0.3–0.8 and lose 3 FA. Recalibrated to a mean of 0.05 on the logged statistics
+(`solve_param` of `run_e7_adaptive_alpha.py`), both rules tie the fixed value within noise, with
+no gain; the spectral-norm rule settles below its target (mean 0.028) because a smaller α leaves
+a larger raw step W_t − M_{t−1} at the next task, which shrinks α further. Conclusion: a fixed α
+per split.
+
+### 5.7 Outcome
+
+| setting | paper | tuned (this campaign) |
+|---|---|---|
+| training | SGD lr 1e-2, batch 64, 10 epochs, wd 5e-4, r 64, qkv + fc1 + fc2 | unchanged |
+| merge | α 0.15, p 0.9 | **α 0.05, p 0.1** |
+| drift λ | 100 fixed | **1000** (GCV choice; `--lambda-rule gcv` or fixed 1000) |
+| alignment | weight 0.2, N 40, K 64, 10 × 100 steps | unchanged (user choice: weight 0.5, equal within noise) |
+| 20-task CIFAR-100 (3 seeds) | 90.35 / 94.36 / 5.03 | **91.26 ± 0.08 / 94.39 ± 0.13 / 3.28 ± 0.17** |
+| best published (E2-LoRA / TUNA) | 91.42 / 94.55 · 91.31 / 94.68 | |
+
+The whole gain over the paper row comes from the merge step (α, p, λ); FA ends 0.16 below
+E2-LoRA and level with TUNA, forgetting falls from 5.0 to 3.3. The exact final combination with
+weight 0.5 and fixed λ 1000 has one seed only (91.32 / 94.50 / 3.02, the weight-0.5 cell); the
+three-seed number above is for weight 0.2 with λ by GCV. Open: the 50-task split (chain not yet
+retrained; α may need to be smaller still).
+
+---
+
 ## Appendix B — Hardware and software
 
 All experiments ran on a single workstation:

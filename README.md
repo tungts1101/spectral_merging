@@ -142,8 +142,9 @@ python run_best.py          # all 4 benchmarks x 3 seeds
 ```
 
 - Datasets resolve under `DATA_ROOT` in `utils/data.py` (default
-  `/home/lis/data`); CIFAR-100 downloads via torchvision, ImageNet-R / CUB /
-  Cars are fetched automatically on first use.
+  `/home/lis/data`; set the environment variable `DATA_ROOT` to your own
+  folder). The main-table datasets are fetched on first use; the table below
+  gives the sources and the on-disk layout.
 - Backbone: timm `vit_base_patch16_224.augreg2_in21k_ft_in1k` (downloaded from
   the HF hub on first run).
 - First run trains all backbones (~2 h/benchmark on a single 24 GB GPU);
@@ -151,7 +152,42 @@ python run_best.py          # all 4 benchmarks x 3 seeds
   take ~10 min/seed.
 - Per-dataset hyperparameters (weight decay, adapter coverage, merge α/p,
   drift λ, alignment settings) are in `run_best.py`; everything else is shared
-  across benchmarks.
+  across benchmarks. `RESULTS.md` lists every number of the paper with the
+  configuration that produced it, and `PAPER_TRACKER.md` maps each table and
+  figure to its script and log.
+
+### Datasets
+
+| Dataset | Used for | How it is obtained | Layout under `DATA_ROOT` |
+|---|---|---|---|
+| CIFAR-100 | main table (10 / 20 / 50 tasks), robustness | `torchvision.datasets.CIFAR100(download=True)`, automatic | `cifar-100-python/` |
+| ImageNet-R | main table, long tasks, appendix experiments | automatic: `gdown` from the Google-Drive archive of Zhou et al. ([RevisitingCIL](https://github.com/zhoudw-zdw/RevisitingCIL)), file id `1SG4TbiL8_DooekztyCVK8mPmfhMo8fkR`; OneDrive mirror linked in `utils/data.py` | `imagenet-r/{train,test}/<class>/` |
+| CUB-200 | main table | automatic: `gdown`, RevisitingCIL file id `1XbUpnWpJPnItt5zQ6sHJnsjPncnNLvWb` | `cub/{train,test}/<class>/` |
+| Stanford Cars | main table | automatic through `kagglehub` (`rickyyyyyyy/torchvision-stanford-cars`); needs a Kaggle API token in `~/.kaggle/kaggle.json` | `stanford_cars/` (torchvision `StanfordCars` layout) |
+| CIFAR-100-C / -P | robustness tables (`RESULTS.md`, Section 2) | the releases of Hendrycks & Dietterich (Zenodo records 3555552 and 3555553); the per-corruption results are in `figures_data/*_per_category.csv` | `CIFAR-100-C/`, `CIFAR-100-P/` |
+| Office-Home | domain-incremental table | manual download of the official release; the loader writes its own 70/30 split files (seed 1993) | `OfficeHome/{Art,Clipart,Product,Real World}/<class>/` |
+| DomainNet | domain-incremental table | manual download of the *cleaned* version from http://ai.bu.edu/M3SDA/ together with the official `<domain>_{train,test}.txt` split files | `DomainNet/<domain>/...` and the split files |
+| X-TAIL (RAIL stream) | rebuttal only | `scripts/xtail_download.py`, `scripts/xtail_splits.py` | see `utils/data.py` (`xtail`) |
+
+If `gdown` is rate-limited, download the archive by hand from the link in
+`utils/data.py` and unzip it under `DATA_ROOT` (the archives already contain
+the `train/` and `test/` folders). Nothing else is needed for the main table:
+the backbone comes from the HF hub through timm, and every checkpoint is
+trained from scratch by `run_best.py`.
+
+### Long task sequences
+
+```bash
+python run_long.py --ds cifar224 imagenetr --split t20   # 20 tasks, 3 seeds
+python run_long.py --ds cifar224 imagenetr --split t50   # 50 tasks
+```
+
+Splits: CIFAR-100 20 x 5 and 50 x 2 classes, ImageNet-R 20 x 10 and 50 x 4.
+The 50-task chains use 5 epochs per task (`RESULTS.md`, Section 4). Stage-2
+options on a cached chain (`--cells ALPHA:P`, `--lambda-rule gcv`,
+`--set KEY=VALUE`, `--tag`) are documented in the file header; the 20-task
+CIFAR-100 tuning campaign that used them is recorded in `RESULTS.md`,
+Section 5.
 
 ## Files
 
