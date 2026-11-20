@@ -988,6 +988,32 @@ Storage per class d² + d: 1.05M numbers at d = 1024 (0.59M at 768). Fine-tuning
 
 ---
 
+### 6.13 Robustness re-run check on the retrained CIFAR-100 chain (2026-11-20)
+
+The deployed models behind Section 2 were lost with sakura (Appendix C), so the exported
+model and the ported harness were checked once end to end on bio: the paper CIFAR-100 cell
+(`run_best.py` setting, α 0.15, p 0.9, λ 100, local-term weight 0.2) re-run on the retrained chain
+of Section 6.1 with `python run_robustness_models.py --arms ours --prefix main_cifar224_r64_qkvfc
+--ckpt-dir checkpoints_main/rebuttal/e12_cifar224 --out final_models/robcheck` (log
+`logs_main/cifar224/rob_ours.log`), then `python robustness/eval_corruption.py
+final_models/robcheck/cifar224_rob_ours_s*.pt` on CIFAR-100-C (Zenodo 3555552; per-cell rows in
+`robustness/results/corruption.csv`, both in the backup's `logs_bio_20261120b.tar.gz`). Clean =
+the harness's own CIFAR-100 test pass through the exported model; FA = the final accuracy
+logged by the pipeline run that produced the export.
+
+| Seed | FA (pipeline log) | Clean (harness) | CIFAR-100-C, 19 corruptions | CIFAR-100-C, 15 standard |
+|---|---|---|---|---|
+| 1993 | 92.26 | 92.28 | 80.02 | 79.12 |
+| 1994 | 92.00 | 91.99 | 79.61 | 78.72 |
+| 1995 | 91.60 | 91.55 | 79.62 | 78.82 |
+| mean ± std | 91.95 ± 0.27 | 91.94 ± 0.30 | 79.75 ± 0.19 | 78.89 ± 0.17 |
+| Section 2 reference (sakura chain, Sep 2026) | 91.95 ± 0.27 | 91.94 ± 0.30 | 79.75 ± 0.19 | 78.89 ± 0.17 |
+
+Reading: the exported model, the loader and the corruption protocol reproduce the Section 2 row
+to the second decimal on a chain retrained from scratch two months later (same seeds, same
+recipe, same backbone weights). CIFAR-100-P and the adversarial script were not re-run (the
+ports are unchanged from the server code apart from paths).
+
 ## Appendix B — Hardware and software
 
 All experiments ran on a single workstation:
@@ -1020,7 +1046,7 @@ save the training time. What exists:
 |---|---|---|---|
 | Main table (Section 1), joint bounds, Section 2 merge-rule ablation, Component contributions | sequential LoRA chains `exp21_<ds>_r64_qkvfc`, trained Sep 2026 on sakura | **lost**: planned as backup tier 3 (4.3 GB) but never uploaded; sakura unreachable since the review period | `run_best.py` (about 2 h per benchmark on one RTX 4090), `run_joint.py` |
 | Main-table chains, retrained Nov 2026 (Section 6.1; the Stage-2 rows of Sections 6.2 and 6.5–6.10 run on them) | `main_<ds>_r64_qkvfc`, 3 seeds × 4 datasets, 5.2 GB | **backed up** (authors' Drive `rebuttal_2026-11/checkpoints/e12_<ds>.tar`, md5 in `MD5SUMS.txt`); restore under `checkpoints_main/rebuttal/e12_<ds>/` and pass `checkpoint_dir` | `run_best.py` |
-| Robustness (Section 2, paper Table 3 / Figures 3–4) | deployed CIFAR-100 models `final_models/cifar224_rob_<arm>_s<seed>.pt` (ours, merge rules, E2-LoRA, LAMDA-PILOT baselines) | **lost with sakura** (the Sep backup holds only the DARE / DELLA / KnOTS exports in `tier2_final_models/`); the per-corruption and per-perturbation results of every model survive in `figures_data/*cifar_{c,p}_per_category.csv` and in the backup's `tier1/robustness_results/*.csv` | `run_robustness_models.py` (exports from the `run_best.py` chain), `robustness/eval_corruption.py`, `robustness/eval_perturbation.py`; see Section 6.13 for the re-run check |
+| Robustness (Section 2, paper Table 3 / Figures 3–4) | deployed CIFAR-100 models `final_models/cifar224_rob_<arm>_s<seed>.pt` (ours, merge rules, E2-LoRA, LAMDA-PILOT baselines) | **lost with sakura** (the Sep backup holds only the DARE / DELLA / KnOTS exports in `tier2_final_models/`); the per-corruption and per-perturbation results of every model survive in `figures_data/*cifar_{c,p}_per_category.csv` and in the backup's `tier1/robustness_results/*.csv` | `run_robustness_models.py` (exports from the `run_best.py` chain), `robustness/eval_corruption.py`, `robustness/eval_perturbation.py`; the 2026-11-20 re-run on the retrained chain reproduces the clean and CIFAR-100-C numbers (Section 6.13) |
 | Domain-incremental (Section 3) | `exp21_ohdil_r64_qkvfc`, `exp21_dndil_r64_qkvfc` | **lost with sakura** | `run_dil.py` (manual datasets) |
 | Long task sequences (Section 4) | 20- and 50-task chains of CIFAR-100 and ImageNet-R, Sep 2026 | **lost** (excluded from the Sep backup, 27 GB); their per-task logs are in the backup (`tier1/logs_exp21/<ds>/longterm_*.log`) | `run_long.py --ds cifar224 imagenetr --split t20 t50` |
 | 20-task CIFAR-100 campaign (Section 5) | retrained paper-recipe chain `main_cifar224_r64_qkvfc_t20`, 3 seeds, 2.1 GB | **backed up** (`long_cifar224_t20_paperchain_s<seed>.tar`); restore under `checkpoints_main/rebuttal/long_cifar224_t20/` | `run_long.py --ds cifar224 --split t20`, then `--cells A:P --lambda-rule gcv --no-base` |
