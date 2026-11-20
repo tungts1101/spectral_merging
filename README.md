@@ -153,8 +153,15 @@ python run_best.py          # all 4 benchmarks x 3 seeds
 - Per-dataset hyperparameters (weight decay, adapter coverage, merge α/p,
   drift λ, alignment settings) are in `run_best.py`; everything else is shared
   across benchmarks. `RESULTS.md` lists every number of the paper with the
-  configuration that produced it, and `PAPER_TRACKER.md` maps each table and
-  figure to its script and log.
+  configuration that produced it (see "Where each number comes from" below).
+- Checkpoints: none are needed. Every number is regenerated from scratch by
+  the scripts below; cached chains only save training time. `RESULTS.md`,
+  Appendix C, lists which chains the authors keep and which were lost with the
+  original server. The Stage-2 drivers (`run_sota_merge.py`, the `run_e*.py`
+  and `analyze_*.py` files) look for the chain under the prefix
+  `main_<ds>_r64_qkvfc` (`rebuttal_common.prefix`) and train it on first use;
+  where a driver offers `--prefix-family best`, it reuses `run_best.py`'s
+  `best_<ds>_r64` chain instead.
 
 ### Datasets
 
@@ -189,6 +196,84 @@ options on a cached chain (`--cells ALPHA:P`, `--lambda-rule gcv`,
 CIFAR-100 tuning campaign that used them is recorded in `RESULTS.md`,
 Section 5.
 
+### Domain-incremental learning
+
+```bash
+python run_dil.py                     # Office-Home and DomainNet, 3 seeds
+```
+
+Office-Home and DomainNet are manual downloads (table above). The configuration
+(Section 1 posture, α 0.15, λ 100, local-term weight 0.1; DomainNet 5 epochs per
+session) is in the file; results in `RESULTS.md`, Section 3.
+
+### Robustness: CIFAR-100-C and CIFAR-100-P
+
+```bash
+python run_robustness_models.py                                             # exports final_models/cifar224_rob_ours_s{1993,1994,1995}.pt
+python robustness/eval_corruption.py   final_models/cifar224_rob_ours_s*.pt  # -> robustness/results/corruption.csv
+python robustness/eval_perturbation.py final_models/cifar224_rob_ours_s*.pt  # -> robustness/results/perturbation.csv
+python robustness/eval_adversarial.py  final_models/cifar224_rob_ours_s*.pt  # FGSM / PGD (RESULTS.md, "Known weaknesses")
+```
+
+`run_robustness_models.py` re-runs the main-table CIFAR-100 cell on the cached
+chain of `run_best.py` (10 min per seed; it trains the chain first if it is
+missing) and writes the deployed model (LoRA trainables, aligned head, class
+Gaussians) through `main.py`'s `final_model_dir` hook. `--arms merge_avg
+merge_ties merge_max_abs nomerge` export the merge-rule ablation of Table 8 from
+the same chain, `--arms e2lora` the matched-backbone E2-LoRA row. The data sit
+under `DATA_ROOT/CIFAR-100-C/` and `DATA_ROOT/CIFAR-100-P/` (Zenodo records
+3555552 and 3555553). The corruption script prints the mean over all 19
+corruptions (`RESULTS.md`, Section 2) and over the 15 standard corruptions (the
+paper's Table 3 and Figure 3); the perturbation script reports the mean flip
+probability over the 10 official perturbations on the first 2,500 sequences.
+One CIFAR-100-C evaluation takes about 1.5 h per model on an RTX 4090, one
+CIFAR-100-P evaluation about 1.1 h. The SLCA / EASE / MOS / TUNA rows were
+exported from a LAMDA-PILOT checkout with a `save_final_model` hook
+(`robustness/model_zoo.py` loads them); that patched copy is not part of this
+repository. The per-corruption and per-perturbation numbers of every published
+model are in `figures_data/*cifar_{c,p}_per_category.csv`.
+
+### Appendix experiments (`RESULTS.md`, Section 6)
+
+All on the cached chain of each dataset (see the checkpoint note above), 3
+seeds, ImageNet-R unless stated; logs go to `logs_main/<ds>/<cell>.log` and
+`python parse_logs.py <experiment>` turns them into the `figures_data/` CSVs.
+
+| Paper | Command |
+|---|---|
+| Table 6 / 7, merge rules under an equal budget | `python run_e12_merge_grid.py --budget 4 --rules <rule> --ds <ds>` for every rule (`scripts/e12f_machine.sh` runs a machine's share); `python scripts/e12p_table6.py` builds the table |
+| Table 1, KeepLoRA row | `python run_keeplora.py --stage main` (official recipe, rank 16) |
+| Table 11, LoRA rank | `python run_e12_ism_ext.py --rank 16 --stage chain` (also 32 and 128; each trains its own chain) |
+| Table 13, few-shot tasks | `python run_e13_fewshot.py --k 5 10 --rows ism e2lora lca`; `python run_rail_fewshot.py --dataset imagenetr` |
+| Table 14, adaptive damping | `python run_e7_adaptive_alpha.py --rules specnorm featshift --tau 0.1 --kappa 0.15 --lambda-rule val` (constants from `--calibrate`, `figures_data/e7_calibration.json`) |
+| Table 15, discarded directions | `python analyze_subspace.py --ds imagenetr --p 0.1` and the default p 0.9; `scripts/fig8_subspace.py` |
+| Table 16, cheaper class statistics | `python run_covmode.py --modes cov_class cov_diag cov_mean` |
+| Table 17, cost of the drift solve | `python run_covmode.py --timing --solver dense` and `--solver woodbury`; few-shot rows from `run_e13_fewshot.py --timing` |
+| Table 17, ViT-L/16 row | `python run_vitl.py` (3 seeds, lr 5e-3, two micro-batches) then `python run_vitl.py --controls` |
+| Table 18, drift map on stored samples | `python run_e9_buffer.py --n 5 10 20 --with-reference` |
+| Appendix G, long task sequences | `python run_long.py --ds cifar224 imagenetr --split t20 t50`; `scripts/fig_e1_long.py` |
+| Spectrum of the updates (calibration input) | `python analyze_spectrum.py --ds <ds>` |
+
+### Where each number comes from
+
+| Paper item | `RESULTS.md` | Produced by |
+|---|---|---|
+| Table 1 (main table), joint bounds | Section 1 | `run_best.py`, `run_joint.py`; published rows quoted from the papers; KeepLoRA row `run_keeplora.py` (Section 6.3) |
+| Table 2 (domain-incremental) | Section 3 | `run_dil.py` |
+| Table 3, Figures 3–4 (robustness) | Section 2 | `run_robustness_models.py`, `robustness/eval_*.py`, `scripts/fig3_robustness.py` |
+| Table 4 (damping and energy fraction, p = 1 rows) | Section 2, "Merge 3-D ablation" | `main.run_config_sweep` cells over variant × p × α on the cached chain, exported by `export_mc3d_full.py` to `figures_data/mc3d_<ds>_full.csv`; `run_e8_trunc_vs_damp.py` for the p = 1 rows |
+| Table 5 (per-dataset settings) | Section 1, "Running configuration" | `run_best.py` (`CONFIGS`) |
+| Tables 6–7 (merge rules, equal budget) | Section 6.2 | `run_e12_merge_grid.py --budget 4` |
+| Table 8 (robustness of the merge rules) | Section 2 | `run_robustness_models.py --arms merge_*` and the same export with the rules of `merging_sota.py` |
+| Table 9 (component contributions) | "Component contributions" | `main.run_config_sweep` lattice cells (`train_merge`, `train_ca`, `train_drift` toggled) on the cached chain |
+| Table 10 (sequential vs independent initialisation) | "Sequential versus independent task initialisation" | `main.run_config_sweep` with `seqft_independent` |
+| Tables 11–18 (appendices F–M) | Sections 6.4–6.10 | the commands of the table above |
+| Figure 2 (merge sweep) | Section 2, "Merge 3-D ablation" | `scripts/fig5_merge_sweep.py` from `figures_data/mc3d_imagenetr.csv` |
+| Appendix G, Table 12 (long task sequences) | Sections 4 and 5 | `run_long.py`, `scripts/fig_e1_long.py` |
+
+`PAPER_TRACKER.md` (authors' copy) maps every figure and table to its script
+and log file.
+
 ## Files
 
 | File | Contents |
@@ -198,3 +283,13 @@ Section 5.
 | `backbones.py` | reference-recipe ports and adapter utilities used by main.py |
 | `utils/` | dataset definitions and the incremental `DataManager` |
 | `run_best.py` | headline-result reproduction script |
+| `run_joint.py` | joint-training upper bound (all classes in one task, same recipe) |
+| `run_dil.py` | domain-incremental Office-Home / DomainNet (Table 2) |
+| `run_robustness_models.py`, `robustness/` | export of the deployed CIFAR-100 models and the CIFAR-100-C / -P / adversarial evaluators (Table 3, Figures 3–4, Table 8) |
+| `run_long.py` | 20- and 50-task splits and the Stage-2 options used in the 20-task campaign (`RESULTS.md`, Sections 4–5) |
+| `run_sota_merge.py`, `merging_sota.py` | published merge rules (DARE, DELLA, Breadcrumbs, KnOTS, Model Stock, NUFILT, OPCM) in the sequential protocol |
+| `rebuttal_common.py`, `run_e*.py`, `run_keeplora.py`, `run_vitl.py`, `run_rail_fewshot.py`, `analyze_*.py`, `run_covmode.py` | the appendix experiments (`RESULTS.md`, Section 6) |
+| `parse_logs.py`, `export_mc3d_full.py` | log parsers that write the `figures_data/` CSVs |
+| `scripts/` | figure scripts (`fig*.py`), the Table 6 builder, the machine queues that ran the appendix experiments, X-TAIL data tools |
+| `figures_data/` | the CSVs behind every figure and the appendix tables |
+| `RESULTS.md` | every number of the paper with its configuration and log; `PAPER_TRACKER.md` (authors' copy) maps tables and figures to scripts |

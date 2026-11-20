@@ -54,6 +54,7 @@ row carries mean ± std.
 | SLDC (AAAI'26) | 91.48 ± 0.24 | 94.38 ± 0.69 | 80.00 ± 0.29 | 84.01 ± 0.46 | 87.15 ± 0.50 | 92.38 ± 0.57 | 80.50 ± 0.30 | 85.45 ± 0.41 | 84.78 | 89.06 |
 | LoDA (ICML'26) | 90.47 ± 0.06 | 93.46 ± 1.42 | 81.93 ± 0.20 | 86.90 ± 0.40 | 81.74 ± 0.78 | 89.35 ± 0.98 | n/e | n/e | n/a | n/a |
 | LCA (ICLR'26) | n/r | 94.80 ± 0.30 | n/r | 85.80 ± 0.20 | n/r | 90.80 ± 0.30 | n/r | 76.20 ± 1.40 | n/a | 86.90 |
+| KeepLoRA (ICLR'26; our run of the official code, Section 6.3) | 88.70 ± 0.22 | 92.82 ± 0.16 | 78.61 ± 0.04 | 83.59 ± 0.25 | 80.27 ± 0.72 | 86.55 ± 0.88 | 54.32 ± 0.90 | 60.48 ± 0.16 | 75.48 | 80.86 |
 | E2-LoRA (ICML'26) | **92.13 ± 0.19** | **95.01 ± 0.02** | 82.77 ± 0.10 | 87.18 ± 0.12 | **89.77 ± 0.16** | **92.68 ± 0.48** | 75.82 ± 0.28 | 80.90 ± 0.73 | 85.12 | 88.94 |
 | **Ours** | 91.95 ± 0.27 | 94.82 ± 0.14 | **83.68 ± 0.15** | **87.54 ± 0.20** | 88.90 ± 0.46 | 92.16 ± 0.63 | **83.72 ± 0.05** | **87.09 ± 0.47** | **87.06** | **90.40** |
 
@@ -259,6 +260,10 @@ base, 3 seeds, paired backbones; FA | AA):
 Stage-1 tuning grids and all cell results are in `logs_main/sota_merge.log`; DARE at q=0.9
 with c=1.0 collapses in the sequential chain (FA 0.52 on ImageNet-R) and its tuned q=0.5 is
 used. Implementations in `merging_sota.py` (protocol-verified against `helper.merge`).
+
+The revised paper's Table 6 (every rule tuned per dataset over four settings under the full
+protocol, NUFILT added, Model Breadcrumbs dropped) is Section 6.2; the table above is the
+submitted version.
 
 The ordering pspectral > average > TIES > max-abs holds on every dataset. The margin is
 largest on the fine-grained sets (CUB +3.03, Cars +1.36 over the best classical rule) and the
@@ -503,6 +508,15 @@ not reported: at 6 x 345 classes the published alignment setting (512 samples fo
 seen class) allocates a 3.0 GB feature tensor in the final session and exceeds the
 24 GB card.
 
+Our row's configuration (`run_dil.py`, the port of the server drivers that produced it): the
+Section 1 stack with LoRA r = 64 on `qkv`, `fc1`, `fc2`, pspectral `only_A` p 0.9, α 0.15,
+identity-ridge λ 100, full transport, local-term weight 0.1, γ 0; weight decay 1e-3 on
+Office-Home (10 epochs per session) and 5e-4 on DomainNet (5 epochs per session, the
+long-sequence setting); labels offset per domain and scored modulo 65 / 345
+(`dil_classes_per_domain`); backbone `vit_base_patch16_224.augreg2_in21k_ft_in1k`; 3 seeds.
+Chains `exp21_{ohdil,dndil}_r64_qkvfc` (Appendix C: lost with sakura; logs in the backup's
+`tier1/logs_exp21/{officehome_dil,dndil}/`).
+
 ---
 
 ## 4. Long task sequences
@@ -694,6 +708,286 @@ retrained; α may need to be smaller still).
 
 ---
 
+## 6. Rebuttal experiments (8–20 Nov 2026) — the revised PDF's Appendices F–M, Table 1 KeepLoRA row, Table 6 revision
+
+Everything in this section was produced after the submission on the lab machines `bio`
+(RTX 4090, user `bio`) and `greenhorn` (RTX 4090), because the submission-time server
+`sakura` became unreachable during the review period. Code: commits 9e6a38f (E-series drivers),
+5df8c75, d490d10, c389370 and later on `master`. Every number below is in the revised PDF
+unless marked otherwise; the per-seed values are in the logs named per subsection (all logs are
+in the authors' backup, `rebuttal_2026-11/logs/`, see Appendix C). Metric names in the logs:
+FAA = FA, ASA = AA, FFM = Forgetting; a log's own SUMMARY block covers only the seeds of one
+process, so multi-seed numbers of `--append`ed logs are computed from the per-seed finals
+(`seedsum.sh` in the backup does this).
+
+Protocol shared by every subsection: ViT-B/16 `vit_base_patch16_224.augreg2_in21k_ft_in1k`,
+LoRA r = 64 on `qkv`, `fc1`, `fc2`, the Section 1 "Running configuration" (per-dataset weight
+decay, α, λ, local-term weight), seeds 1993 / 1994 / 1995, 10 tasks. Stage-2 experiments run on
+the cached chains of Section 6.1.
+
+### 6.1 Retrained chains and the paper setting (`e12_ism`)
+
+The sequential LoRA chains of the main table were retrained once per dataset with the paper
+recipe (`train_prefix main_<ds>_r64_qkvfc`, checkpoint dir `checkpoints_main/rebuttal/e12_<ds>`;
+CIFAR-100 and Cars trained on greenhorn, ImageNet-R and CUB on bio, then copied to both
+machines). The paper-setting cell on these chains (log `logs_main/<ds>/e12_ism.log`) is the
+reference of every Stage-2 experiment below and the "ISM (ours)" row of the revised Table 6.
+
+| Dataset | per-seed FA (1993 / 1994 / 1995) | FA | AA | Forgetting | Section 1 row (FA / AA / FF) |
+|---|---|---|---|---|---|
+| CIFAR-100 | 92.22 / 91.85 / 91.54 | 91.87 ± 0.28 | 94.79 ± 0.15 | 3.10 ± 0.28 | 91.95 ± 0.27 / 94.82 ± 0.14 / 3.05 |
+| CUB-200 | 89.07 / 88.95 / 88.83 | 88.95 ± 0.10 | 92.31 ± 0.50 | 4.69 ± 0.12 | 88.90 ± 0.46 / 92.16 ± 0.63 / 4.74 |
+| ImageNet-R | 83.34 / 83.39 / 83.71 | 83.48 ± 0.16 | 87.61 ± 0.10 | 3.81 ± 0.22 | 83.68 ± 0.15 / 87.54 ± 0.20 / 3.74 |
+| Stanford Cars | 83.58 / 83.48 / 84.04 | 83.70 ± 0.24 | 87.05 ± 0.36 | 5.54 ± 0.35 | 83.72 ± 0.05 / 87.09 ± 0.47 / 5.71 |
+
+Every retrained chain reproduces its Section 1 row within 0.2 FA. These four chains are the
+backed-up main-table checkpoints (Appendix C); the September chains were lost with sakura.
+
+### 6.2 Table 6 revised: equal-budget comparison of merge rules, full protocol
+
+Decision 2026-11-14 (user): Table 6 reports every rule under the full pipeline (merge + drift
+map + alignment, each dataset's Section 1 posture), tuned **per dataset** over four settings
+each, three seeds per setting, the setting with the highest mean FA reported. Selection is on
+the test split for every rule alike (the paper states this in Appendix C, "Hyperparameter
+selection"). Driver `run_e12_merge_grid.py --budget 4 --rules <rule> --ds <ds>`; machine
+queues `scripts/e12f_machine.sh bio` (ism nufilt ties knots modelstock) and
+`scripts/e12f_machine.sh greenhorn` (dare della breadcrumbs avg max_abs); table builder
+`scripts/e12p_table6.py`. Logs `logs_main/<ds>/e12_<rule>_<setting>.log`, one per cell, 3 seeds.
+
+Grids (paper Table 7):
+
+| Merge rule | Tuned parameters | Four settings | Log name pattern |
+|---|---|---|---|
+| ISM (ours) | α, p | paper setting of Table 5 reported (see note) | `e12_ism.log` |
+| Model Stock | none | one setting | `e12_modelstock_c1.0.log` |
+| Task Arithmetic (average) | coefficient c | c ∈ {0.3, 0.5, 0.7, 1.0} | `e12_avg_c<c>.log` |
+| DELLA | c, drop rate q | c ∈ {0.3, 1.0} × q ∈ {0.5, 0.9} | `e12_della_q<q>_c<c>.log` |
+| KnOTS-TIES | c, kept rank k | c ∈ {0.3, 1.0} × k ∈ {50, 100} % | `e12_knots_k<k>_c<c>.log` |
+| DARE | c, drop rate q | c ∈ {0.3, 1.0} × q ∈ {0.5, 0.9} | `e12_dare_q<q>_c<c>.log` |
+| TIES | c, trim k | c ∈ {0.3, 1.0} × k ∈ {20, 100} % | `e12_ties_k<k>_c<c>.log` |
+| Max-abs (MagMax) | c | c ∈ {0.3, 0.5, 0.7, 1.0} | `e12_max_abs_c<c>.log` |
+| NUFILT | c, null-space rank | c ∈ {0.1, 0.3} × {32, 64} | `e12_nufilt_rp<rank>_c<c>.log` |
+| Model Breadcrumbs | β, c | β ∈ {0.5, 0.85} × c ∈ {0.3, 1.0} | `e12_breadcrumbs_b<β>_c<c>.log` (run; removed from the paper on 2026-11-15) |
+
+Note on the ISM row: the paper's Table 7 lists α ∈ {0.1, 0.3} × p ∈ {0.7, 0.9} as ISM's four
+settings. The ISM row of Table 6 is the paper setting of Table 5 on the retrained chains
+(Section 6.1, α 0.15 / 0.10 / 0.30 / 0.20 for CIFAR-100 / CUB / ImageNet-R / Cars, p 0.9, log
+`e12_ism.log`). The queued GRID4 ISM cells on bio and greenhorn were cancelled on 2026-11-15
+00:52 ("ISM cells already run by the authors", `logs_main/e12f_ism_{bio,greenhorn}.out`); no
+log of those four cells is in this backup.
+
+Result (FA / AA, mean ± std over seeds; the paper prints the means):
+
+| Merge rule | CIFAR-100 | CUB-200 | ImageNet-R | Stanford Cars | Avg FA / AA | Selected setting (CIFAR / CUB / IN-R / Cars) |
+|---|---|---|---|---|---|---|
+| ISM (ours) | 91.87 ± 0.28 / 94.79 ± 0.15 | 88.95 ± 0.10 / 92.31 ± 0.50 | 83.48 ± 0.16 / 87.61 ± 0.10 | 83.70 ± 0.24 / 87.05 ± 0.36 | 87.00 / 90.44 | paper setting |
+| Model Stock | 90.59 ± 0.24 / 94.42 ± 0.15 | 86.10 ± 0.22 / 91.09 ± 0.35 | 83.08 ± 0.18 / 87.48 ± 0.07 | 82.67 ± 0.38 / 87.13 ± 0.27 | 85.61 / 90.03 | one setting |
+| Task Arithmetic (average) | 91.49 ± 0.10 / 94.55 ± 0.14 | 89.01 ± 0.22 / 92.37 ± 0.49 | 83.01 ± 0.15 / 87.34 ± 0.09 | 82.65 ± 0.43 / 86.74 ± 0.31 | 86.54 / 90.25 | c 0.3 / 0.3 / 0.7 / 0.7 |
+| DELLA | 91.51 ± 0.10 / 94.56 ± 0.14 | 89.06 ± 0.19 / 92.39 ± 0.50 | 82.98 ± 0.20 / 87.39 ± 0.09 | 82.22 ± 0.40 / 87.06 ± 0.29 | 86.44 / 90.35 | q 0.5 c 0.3 / q 0.5 c 0.3 / q 0.5 c 1.0 / q 0.5 c 1.0 |
+| KnOTS-TIES | 91.36 ± 0.03 / 94.48 ± 0.12 | 88.52 ± 0.19 / 92.04 ± 0.40 | 82.67 ± 0.32 / 87.19 ± 0.11 | 81.84 ± 0.56 / 86.68 ± 0.34 | 86.10 / 90.10 | k100 c0.3 / k50 c0.3 / k50 c1.0 / k100 c1.0 |
+| DARE | 91.47 ± 0.09 / 94.56 ± 0.13 | 88.97 ± 0.12 / 92.34 ± 0.51 | 82.37 ± 0.16 / 87.18 ± 0.11 | 82.08 ± 0.67 / 86.91 ± 0.37 | 86.22 / 90.25 | q 0.5 c 0.3 / q 0.5 c 0.3 / q 0.5 c 1.0 / q 0.5 c 1.0 |
+| TIES | 91.38 ± 0.07 / 94.51 ± 0.14 | 88.75 ± 0.09 / 92.19 ± 0.50 | 82.85 ± 0.23 / 87.21 ± 0.11 | 82.35 ± 0.39 / 86.90 ± 0.25 | 86.33 / 90.20 | k20 c0.3 / k20 c0.3 / k20 c1.0 / k20 c1.0 |
+| Max-abs (MagMax) | 91.43 ± 0.11 / 94.62 ± 0.09 | 88.30 ± 0.20 / 91.93 ± 0.38 | 82.80 ± 0.10 / 87.26 ± 0.10 | 82.18 ± 0.33 / 86.51 ± 0.37 | 86.18 / 90.08 | c 0.3 / 0.3 / 0.7 / 0.5 |
+| NUFILT | 91.64 ± 0.23 / 94.72 ± 0.14 | 88.96 ± 0.11 / 92.37 ± 0.53 | 83.30 ± 0.23 / 87.36 ± 0.10 | 82.81 ± 0.40 / 86.29 ± 0.31 | 86.68 / 90.19 | rp32 c0.3 / rp32 c0.1 / rp32 c0.3 / rp32 c0.3 |
+| Model Breadcrumbs (not in the paper) | 91.66 ± 0.24 / 94.70 ± 0.14 | 88.87 ± 0.11 / 92.37 ± 0.50 | 83.20 ± 0.28 / 87.43 ± 0.05 | 83.03 ± 0.44 / 86.77 ± 0.39 | 86.69 / 90.32 | b0.85 c1.0 / b0.85 c0.3 / b0.5 c1.0 / b0.5 c1.0 |
+
+Reading: ISM has the highest average FA and AA and the highest FA on CIFAR-100, ImageNet-R
+and Stanford Cars; its margins are largest on Cars (0.9 to 1.9) and ImageNet-R (0.2 to 1.1); on
+CIFAR-100 and CUB-200 most rules come within 0.5 of ISM. Compared with the submitted Table 6
+(the "Extended comparison" of Section 2, ImageNet-R-tuned settings reused elsewhere), the
+per-dataset tuning lifts every published rule by 1 to 3 points on CIFAR-100 and CUB-200.
+
+A proxy variant of the same grid (`--proto`: the best setting chosen by a cosine-prototype
+head without the drift map and the alignment, logs `e12p_<rule>_<setting>.log`) was run first
+and is not used in the paper.
+
+### 6.3 KeepLoRA (Table 1 row, Appendix "New baselines")
+
+Official code of KeepLoRA (Luo et al., ICLR 2026; github.com/MaolinLuo/KeepLoRA, branch v1)
+ported as `train_method = "keeplora"` (`backbones.KeepLoRALinear`, `keeplora_subspace.py`,
+tested against a transcription of the released code by `scripts/test_keeplora_subspace.py`);
+driver `run_keeplora.py --stage main`. Released recipe: AdamW 1e-3, weight decay 0.01, batch 64,
+10 epochs, OneCycleLR, rank 16 (scaling α/r with α = 1), q/k/v and out-proj of every block,
+ε_w 0.85, ε_f 0.99, adapter merged after each task; our per-task head initialised to the
+normalised class means. Two released-code choices that differ from the paper text are
+switchable (`keeplora_wp_side`, `keeplora_feat_mode`; defaults follow the released code).
+Backbone as ours. Logs `logs_main/<ds>/keeplora_matched_<ds>.log` (CIFAR-100 on greenhorn, the
+rest on bio), 3 seeds.
+
+| Dataset | FA | AA | Forgetting |
+|---|---|---|---|
+| CIFAR-100 | 88.70 ± 0.22 | 92.82 ± 0.16 | 5.76 |
+| CUB-200 | 80.27 ± 0.72 | 86.55 ± 0.88 | 10.59 |
+| ImageNet-R | 78.61 ± 0.04 | 83.59 ± 0.25 | 5.30 |
+| Stanford Cars | 54.32 ± 0.90 | 60.48 ± 0.16 | 18.63 |
+
+Average FA / AA 75.48 / 80.86. Rank 64 on ImageNet-R (`keeplora_matched_imagenetr_r64.log`,
+released scaling 1/64): 76.49 ± 0.27 / 81.47 ± 0.51 / 4.70, worse than rank 16, so the released
+rank is reported. On Cars the first task collapses right after task 1 (91 to 23) with
+near-class-mean heads, the plain-head regime of that dataset. NUFILT (Qiu et al., 2026) is the
+`nufilt` rule of Section 6.2 (`run_e15_opcm_nufilt.py` / `merging_sota.py`).
+
+### 6.4 LoRA rank (Appendix F, Table 11)
+
+Ranks 16, 32, 128 with LoRA scaling 2r, full protocol, every other setting as in Section 1;
+own chains `checkpoints_main/rebuttal/e12r_<ds>_r<r>` (not kept), driver
+`run_e12_ism_ext.py --rank <r> --stage chain`, logs `logs_main/<ds>/e12r_ism_r<r>.log` (bio
+and greenhorn, see the queue stdouts `e12r_*.out`). Rank 64 = Section 6.1. Merge time per task
+from the `[MergeStat]` lines on ImageNet-R.
+
+| Rank | LoRA parameters | CIFAR-100 FA / AA | CUB-200 FA / AA | ImageNet-R FA / AA | Stanford Cars FA / AA | Merge time |
+|---|---|---|---|---|---|---|
+| 16 | 2.07M | 90.34 ± 0.11 / 93.89 ± 0.10 | 87.77 ± 0.14 / 91.63 ± 0.62 | 79.77 ± 0.38 / 84.65 ± 0.11 | 82.09 ± 0.55 / 86.80 ± 0.84 | 0.03 s |
+| 32 | 4.13M | 91.63 ± 0.04 / 94.68 ± 0.11 | 88.54 ± 0.44 / 91.97 ± 0.72 | 82.66 ± 0.17 / 86.91 ± 0.14 | 83.39 ± 0.67 / 87.29 ± 0.69 | 0.04 s |
+| 64 (paper) | 8.26M | 91.95 ± 0.27 / 94.82 ± 0.14 | 88.90 ± 0.46 / 92.16 ± 0.63 | 83.68 ± 0.15 / 87.54 ± 0.20 | 83.72 ± 0.05 / 87.09 ± 0.47 | 0.11 s |
+| 128 | 16.5M | 91.99 ± 0.08 / 94.84 ± 0.07 | 89.18 ± 0.22 / 92.39 ± 0.51 | 83.72 ± 0.15 / 87.60 ± 0.21 | 83.45 ± 0.38 / 86.58 ± 0.55 | 0.52 s |
+
+Reading: accuracy rises steeply from rank 16 to 32 and flattens from 64 on; rank 128 gains at
+most 0.3 and loses 0.3 on Cars. Kept directions at p = 0.9, r = 64 (spectrum replay,
+`analyze_spectrum.py`, `figures_data/e4_spectrum_<ds>.csv`): 34 of 64 on average (23 at task 1
+to 40 at task 9; qkv 28, fc1 33, fc2 42).
+
+### 6.5 Few-shot tasks (Appendix H, Table 13)
+
+K ∈ {5, 10} training images per class and task on ImageNet-R, test set unchanged (n = 100 /
+200 drift pairs per task, below d = 768; Woodbury solve). ISM, E2-LoRA and LCA in our pipeline
+(`run_e13_fewshot.py --k 5 10 --rows ism e2lora lca`, logs `logs_main/imagenetr/e13_fs<K>_<row>.log`,
+bio); SLCA and EASE through their LAMDA-PILOT implementations with a K-shot hook (queue stdouts
+`queue_e13_pilot_{slca,ease}_fs<K>.out`; SLCA's class Gaussians sampled in float64, float32 gave
+NaN at K = 5); RAIL (`run_rail_fewshot.py --dataset imagenetr`, dual form, adapter on the frozen
+features, logs `e16_rail_fs<K>.log` on greenhorn, `figures_data/appendix/e16_rail_fewshot.csv`).
+FA / AA, 3 seeds:
+
+| K | ISM (ours) | E2-LoRA | LCA | SLCA | EASE | RAIL |
+|---|---|---|---|---|---|---|
+| 5 | 64.31 ± 0.79 / 64.65 ± 1.49 | 53.46 ± 0.98 / 54.36 ± 1.39 | 62.78 ± 0.85 / 62.63 ± 1.85 | 56.91 ± 1.49 / 59.42 ± 1.40 | 47.54 ± 0.35 / 53.79 ± 0.87 | 55.77 / 59.95 |
+| 10 | 71.84 ± 0.75 / 75.67 ± 1.12 | 61.64 ± 1.47 / 63.34 ± 1.94 | 69.92 ± 1.13 / 73.95 ± 0.90 | 66.87 ± 0.31 / 68.83 ± 0.44 | 54.65 ± 0.43 / 60.65 ± 0.55 | 61.53 / 65.73 |
+
+Forgetting (K = 5 / 10): ISM 4.80 / 5.87, E2-LoRA 5.71 / 7.22, LCA 4.73 / 9.57. ISM with the
+dense solve (`e13_fs<K>_ism_dense.log`): 64.28 ± 0.81 / 64.67 ± 1.42 and 71.85 ± 0.84 / 75.64 ± 1.09,
+the same map.
+
+### 6.6 Adaptive damping (Appendix I, Table 14)
+
+Two rules set α per task from one constant: spectral norm α_t = min(1, τ / σ₁(Δ_t)) with
+τ = 0.1 and feature shift α_t = min(1, κ / s_t) with κ = 0.15 (constants chosen so that the
+mean α on ImageNet-R is about 0.3, `run_e7_adaptive_alpha.py --calibrate`,
+`figures_data/e7_calibration.json`, input `figures_data/e4_spectrum_imagenetr.csv`); λ chosen
+per task by cross-validation (80/20 split of the task's pairs, λ ∈ {1e-8, …, 1e8} in powers of
+ten, lowest held-out error). Driver `run_e7_adaptive_alpha.py --rules specnorm featshift
+--tau 0.1 --kappa 0.15 --lambda-rule val`, logs `logs_main/imagenetr/e7_{specnorm_0.1,featshift_0.15}_lval.log`
+(greenhorn), 3 seeds, ImageNet-R.
+
+| Rule | Realised α (mean, range over 27 merges) | λ chosen | FA | AA | Forgetting |
+|---|---|---|---|---|---|
+| fixed (paper) | 0.3 | 100 (tuned) | 83.48 ± 0.13 | 87.59 ± 0.10 | 3.81 |
+| spectral norm, τ 0.1 | 0.332 (0.247–0.414) | 1000 at every task | 83.28 ± 0.07 | 87.55 ± 0.10 | 4.41 |
+| feature shift, κ 0.15 | 0.348 (0.288–0.398) | 1000 at every task | 83.26 ± 0.11 | 87.52 ± 0.12 | 4.40 |
+
+Reading: both rules stay within 0.2 FA of the fixed α. On the 20-task CIFAR-100 split the same
+constants realise α 0.3–0.8 and lose 3 FA, and recalibrated constants tie the fixed α
+(Section 5.6): the constant has to be set per split, so the paper keeps a fixed α.
+
+### 6.7 Drift map fitted on stored old-class samples (Appendix M, Table 18)
+
+Exemplar variant, stated in the paper as a violation of exemplar-free CIL: the drift map is
+fitted on N stored images per class for every class seen so far (current task included),
+`run_e9_buffer.py --n 5 10 20 --with-reference`, logs `logs_main/imagenetr/e9b_{ref,n5,n10,n20}.log`
+(greenhorn), ImageNet-R, 3 seeds. The held-out diagnostic arm (error of the transported
+means and covariances) was not run.
+
+| Drift map fitted on | FA | AA | Forgetting |
+|---|---|---|---|
+| current task only (paper) | 83.48 ± 0.13 | 87.59 ± 0.10 | 3.81 |
+| buffer, 5 per class | 83.49 ± 0.11 | 87.61 ± 0.08 | 4.61 |
+| buffer, 10 per class | 83.56 ± 0.10 | 87.61 ± 0.09 | 4.44 |
+| buffer, 20 per class | 83.50 ± 0.10 | 87.62 ± 0.09 | 4.35 |
+
+### 6.8 What the discarded directions carry (Appendix J, Table 15)
+
+For every task from the second on and every adapted layer, the update W_t − M_{t−1} is split by
+its SVD into kept and discarded directions; 2,048 old-class images through M_{t−1} give the
+layer inputs whose 90 %-energy subspace is the old-task feature subspace.
+`analyze_subspace.py --ds imagenetr --p 0.1` (and the default p 0.9), greenhorn, 36 layers ×
+9 tasks × 3 seeds; CSVs `figures_data/appendix/e6_subspace_imagenetr.csv` (p 0.9) and
+`e6_subspace_imagenetr_p0.1.csv`. Means over seeds, tasks and layers:
+
+| Quantity | p 0.9 kept | p 0.9 discarded | p 0.1 kept | p 0.1 discarded | chance |
+|---|---|---|---|---|---|
+| share of the update's energy | 0.903 | 0.097 | 0.167 | 0.833 | – |
+| share of the output change on old-class inputs | 0.979 | 0.021 | 0.242 | 0.758 | – |
+| share of the output change on new-class inputs | 0.979 | 0.021 | 0.243 | 0.757 | – |
+| overlap with the old-input subspace | 0.792 | 0.642 | 0.858 | 0.714 | 0.37 |
+| overlap with the new-input subspace | 0.793 | 0.638 | 0.863 | 0.711 | 0.37 |
+
+The paper reports the p = 0.1 columns (energy 0.17 / 0.83, output change 0.24 / 0.76, overlap
+0.86 / 0.71). Reading: the discarded directions lie largely inside the old-task feature
+subspace and produce three quarters of the change on old-class inputs at p 0.1; at p 0.9 the
+discarded tail holds 9.7 % of the energy but produces only 2.1 % of the output change.
+
+### 6.9 Cheaper class statistics (Appendix K, Table 16)
+
+`run_covmode.py --modes cov_class cov_diag cov_mean`, logs `logs_main/imagenetr/cov_{class,diag,mean}.log`
+(greenhorn), ImageNet-R, 3 seeds. Numbers per class at d = 768.
+
+| Statistics | Numbers per class | FA | AA | Forgetting |
+|---|---|---|---|---|
+| mean + full covariance (paper) | d² + d = 590,592 | 83.48 ± 0.13 | 87.59 ± 0.10 | 3.81 |
+| mean + diagonal covariance | 2d = 1,536 | 82.31 ± 0.24 | 86.54 ± 0.18 | 2.70 |
+| mean alone (nearest-prototype head on the transported means, no alignment) | d = 768 | 82.13 ± 0.01 | 86.31 ± 0.22 | 3.99 |
+
+### 6.10 Cost of the drift solve (Appendix L, Table 17)
+
+Stage timers inside the pipeline (`run_covmode.py --timing --solver dense|woodbury` for the
+full task; `run_e13_fewshot.py --timing` for n = 100 / 200), seconds per task, mean over 27
+task-seeds, ImageNet-R, d = 768; CSVs `figures_data/appendix/timing_*.csv`; logs
+`logs_main/imagenetr/cov_class.log`, `cov_class_woodbury.log` (bio).
+
+| Setting | n pairs | Feature extraction | Dense solve (d × d) | Woodbury solve (n × n) | Whole task after training |
+|---|---|---|---|---|---|
+| full task | 2,400 on average (1,600–2,800) | 8.6 | 0.03 | 0.12 | 88 (statistics 33, alignment 34, evaluation 11, drift 8.6, transport 0.5, merge 0.14) |
+| K = 10 | 200 | 1.7 | 0.01 | < 0.01 | 57 |
+| K = 5 | 100 | 1.3 | 0.01 | < 0.01 | 52 |
+
+Both solvers give the same accuracy to the second decimal (83.48 / 87.59). The solve is below
+0.2 % of a task; feature extraction dominates the drift stage.
+
+### 6.11 Larger backbone: ViT-L/16 on ImageNet-R (Appendix L, last row of Table 17; q6ZZ follow-up)
+
+`run_vitl.py` (3 seeds, about 1.6 h per seed) then `run_vitl.py --controls`: timm
+`vit_large_patch16_224` (AugReg, ImageNet-21K → 1K, the family of our ViT-B/16), d = 1024,
+24 blocks, LoRA r = 64 on qkv / fc1 / fc2 (22.0M parameters), the paper's ImageNet-R settings
+except the learning rate 5e-3 (at 1e-2 seed 1994 diverged in task 8, training loss 0.9 → 3.5
+within three epochs; that chain is `vitl_ism.log`, not reported). Batch 64 processed as two
+micro-batches with one optimizer step (`train_micro_batches 2`; the update equals the
+whole-batch step; peak 23.1 GB). Chain `checkpoints_main/rebuttal/vitl_imagenetr_lr0.005`
+(backed up, Appendix C). Logs `logs_main/imagenetr/vitl_{ism,avg,nomerge}_lr0.005.log`,
+`vitl_ism_lr0.005_woodbury.log`, timers `timing_vitl_ism_lr0.005*.csv` (bio). FA / AA /
+Forgetting, 3 seeds; ViT-B/16 rows from Sections 1 and 2:
+
+| Rule | ViT-B/16 (paper) | ViT-L/16 |
+|---|---|---|
+| ISM (ours) | 83.68 / 87.54 / 3.74 | 85.25 ± 1.00 / 88.86 ± 0.60 / 3.33 ± 0.67 (per seed 86.27 / 83.90 / 85.59) |
+| Task Arithmetic (average) | 83.32 / 87.45 / – | 84.57 ± 1.49 / 88.77 ± 0.74 / 4.44 ± 0.93 |
+| No merge (raw sequential module) | 80.78 / 86.29 / 6.51 | 82.93 ± 1.89 / 87.75 ± 1.19 / 6.02 ± 1.48 |
+
+The Woodbury re-run of the same chain gives 85.15 ± 1.18 / 88.88 ± 0.62 / 3.56 ± 0.83 (same
+map; the gap is the re-run of the later stages). Cost per task (seconds, mean over tasks 2–10
+and seeds, n = 2,365 pairs on average): feature extraction 24.3 (ViT-B 8.6), dense solve 0.05
+(0.03), Woodbury solve 0.14 (0.12), merge 0.27 (0.11), whole task after training 123 (88).
+Storage per class d² + d: 1.05M numbers at d = 1024 (0.59M at 768). Fine-tuning per task about
+4.5 min (ViT-B about 2 min).
+
+### 6.12 Also run, not in the paper
+
+- Spectrum of every update, all four datasets (`analyze_spectrum.py`, logs `e4_spectrum_<ds>.out`;
+  summaries `figures_data/e4_spectrum_<ds>.csv`, full singular-value dumps in the backup).
+- X-TAIL cross-domain stream (`run_xtail.py`, `scripts/xtail_*.py`; logs `logs_main/xtail*`):
+  run on bio, not used in the rebuttal.
+- The 20-task CIFAR-100 hyperparameter campaign of Section 5.
+
+---
+
 ## Appendix B — Hardware and software
 
 All experiments ran on a single workstation:
@@ -714,3 +1008,32 @@ costs on this machine: one 10-task CIFAR-100 / ImageNet-R run with cached backbo
 10 minutes per seed; one CIFAR-100-C evaluation (19 corruptions x 5 severities x 50,000
 images) is about 1.5 hours per model, and one CIFAR-100-P evaluation (10 perturbations x
 2,500 sequences x 31 frames) about 1.1 hours per model.
+
+
+## Appendix C — Checkpoints, logs and reproduction status (2026-11-20)
+
+No checkpoint is needed to reproduce any number in this file: every table is regenerated from
+scratch by the scripts named in `README.md` ("Where each number comes from"). Checkpoints only
+save the training time. What exists:
+
+| Result group | Checkpoints behind it | Status on 2026-11-20 | Regenerate with |
+|---|---|---|---|
+| Main table (Section 1), joint bounds, Section 2 merge-rule ablation, Component contributions | sequential LoRA chains `exp21_<ds>_r64_qkvfc`, trained Sep 2026 on sakura | **lost**: planned as backup tier 3 (4.3 GB) but never uploaded; sakura unreachable since the review period | `run_best.py` (about 2 h per benchmark on one RTX 4090), `run_joint.py` |
+| Main-table chains, retrained Nov 2026 (Section 6.1; the Stage-2 rows of Sections 6.2 and 6.5–6.10 run on them) | `main_<ds>_r64_qkvfc`, 3 seeds × 4 datasets, 5.2 GB | **backed up** (authors' Drive `rebuttal_2026-11/checkpoints/e12_<ds>.tar`, md5 in `MD5SUMS.txt`); restore under `checkpoints_main/rebuttal/e12_<ds>/` and pass `checkpoint_dir` | `run_best.py` |
+| Robustness (Section 2, paper Table 3 / Figures 3–4) | deployed CIFAR-100 models `final_models/cifar224_rob_<arm>_s<seed>.pt` (ours, merge rules, E2-LoRA, LAMDA-PILOT baselines) | **lost with sakura** (the Sep backup holds only the DARE / DELLA / KnOTS exports in `tier2_final_models/`); the per-corruption and per-perturbation results of every model survive in `figures_data/*cifar_{c,p}_per_category.csv` and in the backup's `tier1/robustness_results/*.csv` | `run_robustness_models.py` (exports from the `run_best.py` chain), `robustness/eval_corruption.py`, `robustness/eval_perturbation.py`; see Section 6.13 for the re-run check |
+| Domain-incremental (Section 3) | `exp21_ohdil_r64_qkvfc`, `exp21_dndil_r64_qkvfc` | **lost with sakura** | `run_dil.py` (manual datasets) |
+| Long task sequences (Section 4) | 20- and 50-task chains of CIFAR-100 and ImageNet-R, Sep 2026 | **lost** (excluded from the Sep backup, 27 GB); their per-task logs are in the backup (`tier1/logs_exp21/<ds>/longterm_*.log`) | `run_long.py --ds cifar224 imagenetr --split t20 t50` |
+| 20-task CIFAR-100 campaign (Section 5) | retrained paper-recipe chain `main_cifar224_r64_qkvfc_t20`, 3 seeds, 2.1 GB | **backed up** (`long_cifar224_t20_paperchain_s<seed>.tar`); restore under `checkpoints_main/rebuttal/long_cifar224_t20/` | `run_long.py --ds cifar224 --split t20`, then `--cells A:P --lambda-rule gcv --no-base` |
+| ViT-L/16 (Section 6.11) | `vitl_imagenetr_r64_qkvfc_lr0.005`, 3 seeds, 2.9 GB | **backed up** (`vitl_imagenetr_lr0.005.tar`); restore under `checkpoints_main/rebuttal/vitl_imagenetr_lr0.005/` | `run_vitl.py`, `run_vitl.py --controls` |
+| Rank chains (6.4), few-shot baselines (6.5), training-parameter variant chains (5.3–5.4), ViT-L lr 1e-2 control | r16 / r32 / r128 chains (10 GB), few-shot and PILOT states (29 GB), greenhorn variant chains (16 GB), 4 GB | **not kept** (authors' policy: only the proposed method's reported chains are stored; Drive space 28 GB) | the drivers named in Sections 5 and 6 |
+
+Logs: every log behind Sections 1–4 (`logs_exp21/`, 138 MB) and the robustness CSVs are in
+the authors' Drive backup `tier1/`; every log behind Sections 5–6 (743 cell logs of bio and
+greenhorn, the queue scripts with the exact command lines, the summarisers) is in
+`rebuttal_2026-11/logs/`. Datasets are not backed up (public downloads; `README.md`, Datasets).
+
+Hyperparameter record: the per-dataset settings and the alternatives rejected at submission
+time are in Section 1 ("Running configuration"); the selection protocol and grids of the merge
+rules in Section 6.2; the 20-task campaign (merge α × p, λ, training parameters, alignment
+knobs, adaptive damping) in Section 5; the ViT-L learning-rate change in Section 6.11; the
+KeepLoRA recipe in Section 6.3.
